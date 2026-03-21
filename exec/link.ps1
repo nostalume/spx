@@ -1,42 +1,31 @@
-# SPX Link Command Executor
-# Handles the 'spx link' command
+# exec/link.ps1 - CLI: spx link
+param ([Parameter(ValueFromRemainingArguments)] [string[]]$Args)
 
-param (
-    [Parameter(ValueFromRemainingArguments = $true)]
-    $Args
-)
-
+. "$PSScriptRoot/../context.ps1"
 . "$PSScriptRoot/../lib/Parse.ps1"
+. "$PSScriptRoot/../lib/Config.ps1"
 . "$PSScriptRoot/../modules/Link.ps1"
 
-Write-Debug "[link]: Args: $Args, Count: $($Args.Count)"
+$p      = Get-ParsedArgs $Args
+$app    = $p.Positional[0]
+$path   = $p.Options['path'] ?? $p.Options['to']
+$global = $p.Options.ContainsKey('global') -or $p.Options.ContainsKey('g')
+$wi     = $p.Options.ContainsKey('whatif')
 
-# Parse arguments
-$parsed = Get-ParsedOptions -Flags @("--path", "--to", "--global", "-g") -Arguments $Args
-$pkgs = $parsed.Packages
-$opts = $parsed.Options
-
-$global = $opts["--global"] -or $opts["-g"]
-$path = if ($opts["--path"]) { $opts["--path"] } elseif ($opts["--to"]) { $opts["--to"] } else { $null }
-
-Write-Debug "[link]: Packages: $pkgs"
-Write-Debug "[link]: Path: $path"
-Write-Debug "[link]: Global: $global"
-
-# Validate required arguments
-if ($pkgs.Count -eq 0) {
-    Write-Host "Usage: spx link <app> --path <path>"
-    Write-Host "Use 'spx link --help' for more information."
-    exit 0
+# Export / Import sub-commands
+if ($p.Options['export']) {
+    Export-LinksConfig -Path $p.Options['export']
+    Write-Host "Link config exported to: $($p.Options['export'])"
+    return
+}
+if ($p.Options['import']) {
+    Import-LinksConfig -Path $p.Options['import'] -Merge:($p.Options.ContainsKey('merge'))
+    Write-Host "Link config imported from: $($p.Options['import'])"
+    return
 }
 
-if (-not $path) {
-    Write-Error "Missing required parameter: --path or --to"
-    Write-Host "Usage: spx link <app> --path <path>"
-    exit 1
-}
+if (-not $app)  { Write-Host 'Usage: spx link <app> --path <dir>'; return }
+if (-not $path) { Write-Error 'Missing: --path <dir>'; return }
 
-# Execute link for each package
-foreach ($pkg in $pkgs) {
-    New-AppLink -AppName $pkg -Path $path -Global:$global
-}
+$result = New-AppLink -AppName $app -Path $path -Global:$global -WhatIf:$wi
+if ($result) { Write-Host "[link] '$($result.AppName)' → $($result.TargetPath)  (v$($result.Version))" }

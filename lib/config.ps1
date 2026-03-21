@@ -1,175 +1,131 @@
-# SPX Config - Configuration Management
-# Provides functions for managing SPX configuration files
+# lib/Config.ps1 - SPX configuration I/O
+# Thin read/write layer. No business logic. PS5.1+ compatible.
 
 . "$PSScriptRoot/../context.ps1"
+. "$PSScriptRoot/Core.ps1"
+
+#region Generic spx.json
+
+function Get-SpxConfig {
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param ([string]$Name = 'spx.json', [string]$Key)
+
+    $file = Get-SpxConfigFile -Name $Name -CreateIfMissing
+    if (-not (Test-Path $file) -or (Get-Item $file).Length -eq 0) { return $null }
+
+    $raw  = Get-Content $file -Raw -ErrorAction SilentlyContinue
+    $data = if ($raw) { $raw | ConvertFrom-JsonAsHashtable } else { @{} }
+
+    if ($Key) { return $data[$Key] }
+    $data
+}
+
+function Set-SpxConfig {
+    [CmdletBinding()]
+    param ([string]$Name = 'spx.json', [Parameter(Mandatory)] [string]$Key, $Value)
+
+    $file   = Get-SpxConfigFile -Name $Name -CreateIfMissing
+    $raw    = if (Test-Path $file) { Get-Content $file -Raw -ErrorAction SilentlyContinue } else { $null }
+    $data   = if ($raw) { $raw | ConvertFrom-JsonAsHashtable } else { @{} }
+    $data[$Key] = $Value
+    $data | ConvertTo-Json -Depth 20 | Set-Content $file -Encoding UTF8
+}
+
+#endregion
+
+#region links.json
 
 function Get-LinksConfig {
     [CmdletBinding()]
-    [OutputType([System.Collections.Hashtable])]
+    [OutputType([hashtable])]
     param ()
-    
-    $configFile = Get-SpxConfigFile -Name "links.json" -CreateIfMissing
-    
-    # Check if file exists first, then check if it's empty
-    if (-not (Test-Path $configFile)) {
-        return @{
-            "global" = @{}
-            "local"  = @{}
+
+    $file = Get-SpxConfigFile -Name 'links.json' -CreateIfMissing
+    if (-not (Test-Path $file) -or (Get-Item $file).Length -eq 0) {
+        return @{ local = @{}; global = @{} }
+    }
+
+    $raw  = Get-Content $file -Raw -ErrorAction SilentlyContinue
+    $data = if ($raw) { $raw | ConvertFrom-JsonAsHashtable } else { @{} }
+
+    foreach ($scope in 'local', 'global') {
+        if (-not $data.ContainsKey($scope) -or $data[$scope] -isnot [hashtable]) {
+            $data[$scope] = @{}
         }
     }
-    
-    $fileInfo = Get-Item $configFile -ErrorAction SilentlyContinue
-    if ($null -eq $fileInfo -or $fileInfo.Length -eq 0) {
-        return @{
-            "global" = @{}
-            "local"  = @{}
-        }
-    }
-    
-    try {
-        $content = Get-Content $configFile -Raw
-        $config = $content | ConvertFrom-Json -AsHashtable
-        
-        # Ensure scope fields exist
-        foreach ($scope in @("global", "local")) {
-            if (-not $config.ContainsKey($scope)) {
-                $config[$scope] = @{}
-            }
-        }
-        
-        return $config
-    } catch {
-        Write-Warning "Failed to parse links.json, returning empty config."
-        return @{
-            "global" = @{}
-            "local"  = @{}
-        }
-    }
+    $data
 }
 
 function Set-LinksConfig {
     [CmdletBinding()]
-    param (
-        [Parameter(Mandatory = $true)]
-        [System.Collections.Hashtable]$Config
-    )
-    
-    $configFile = Get-SpxConfigFile -Name "links.json"
-    $Config | ConvertTo-Json -Depth 5 | Set-Content $configFile -Encoding UTF8
+    param ([Parameter(Mandatory)] [hashtable]$Config)
+    $file = Get-SpxConfigFile -Name 'links.json' -CreateIfMissing
+    $Config | ConvertTo-Json -Depth 10 | Set-Content $file -Encoding UTF8
 }
 
-function Invoke-WithLinksConfig {
-    [CmdletBinding()]
-    param (
-        [Parameter(Mandatory = $true)]
-        [scriptblock]$ScriptBlock,
-        
-        [switch]$Global,
-        [switch]$AsReference
-    )
-    
-    $config = Get-LinksConfig
-    $scope = if ($Global) { "global" } else { "local" }
-    $scopeConfig = $config[$scope]
-    
-    if ($AsReference) {
-        $configRef = [ref]$scopeConfig
-        & $ScriptBlock $configRef
-        $config[$scope] = $configRef.Value
-        Set-LinksConfig $config
-    } else {
-        $result = & $ScriptBlock $scopeConfig
-        if ($result -is [hashtable]) {
-            $config[$scope] = $result
-            Set-LinksConfig $config
-        }
-    }
-}
-
-function New-AppLinkEntry {
-    [CmdletBinding()]
-    param (
-        [Parameter(Mandatory = $true)]
-        [string]$AppName,
-        
-        [Parameter(Mandatory = $true)]
-        [string]$Path,
-        
-        [Parameter(Mandatory = $true)]
-        [string]$Version,
-        
-        [switch]$Global
-    )
-    
-    Invoke-WithLinksConfig -Global:$Global {
-        param($Config)
-        
-        if ($Config.ContainsKey($AppName)) {
-            $oldPath = $Config[$AppName].Path
-            $oldAppDir = Join-Path $oldPath $AppName
-            $newAppDir = Join-Path $Path $AppName
-            
-            Write-Debug "[New-AppLinkEntry]: $AppName : $oldPath -> $Path"
-            
-            # Remove old app directory if different from new
-            if ($oldAppDir -ne $newAppDir -and (Test-Path $oldAppDir)) {
-                Remove-Item $oldAppDir -Recurse -Force
-            }
-        }
-        
-        $entry = @{
-            Path    = $Path
-            Version = $Version
-            Updated = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-        }
-        
-        $Config[$AppName] = $entry
-        return $Config
-    }
-}
-
-function Remove-AppLinkEntry {
-    [CmdletBinding()]
-    param (
-        [Parameter(Mandatory = $true)]
-        [string]$AppName,
-        
-        [switch]$Global
-    )
-    
-    Invoke-WithLinksConfig -Global:$Global -AsReference {
-        param([ref]$Config)
-        
-        if (-not $Config.Value.ContainsKey($AppName)) {
-            Write-Debug "[Remove-AppLinkEntry]: $AppName not found in config"
-            return
-        }
-        
-        $appDir = Join-Path $Config.Value[$AppName].Path $AppName
-        if (Test-Path $appDir) {
-            Write-Debug "[Remove-AppLinkEntry]: Removing $appDir"
-            Remove-Item $appDir -Recurse -Force
-        }
-        
-        $Config.Value.Remove($AppName)
-    }
-}
-
-function Get-AppLinkEntry {
-    [CmdletBinding()]
-    param (
-        [Parameter(Mandatory = $true)]
-        [string]$AppName,
-        
-        [switch]$Global
-    )
-    
-    $config = Get-LinksConfig
-    $scope = if ($Global) { "global" } else { "local" }
-    
-    if ($config[$scope].ContainsKey($AppName)) {
-        return $config[$scope][$AppName]
-    }
-    
+function Get-LinkEntry {
+    [OutputType([hashtable])]
+    param ([Parameter(Mandatory)] [string]$AppName, [switch]$Global)
+    $scope = if ($Global) { 'global' } else { 'local' }
+    $cfg   = Get-LinksConfig
+    if ($cfg[$scope].ContainsKey($AppName)) { return $cfg[$scope][$AppName] }
     return $null
 }
+
+function Set-LinkEntry {
+    param (
+        [Parameter(Mandatory)] [string]$AppName,
+        [Parameter(Mandatory)] [string]$Path,
+        [Parameter(Mandatory)] [string]$Version,
+        [switch]$Global
+    )
+    $scope           = if ($Global) { 'global' } else { 'local' }
+    $cfg             = Get-LinksConfig
+    $cfg[$scope][$AppName] = @{
+        Path    = $Path
+        Version = $Version
+        Updated = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+    }
+    Set-LinksConfig $cfg
+}
+
+function Remove-LinkEntry {
+    param ([Parameter(Mandatory)] [string]$AppName, [switch]$Global)
+    $scope = if ($Global) { 'global' } else { 'local' }
+    $cfg   = Get-LinksConfig
+    if ($cfg[$scope].ContainsKey($AppName)) {
+        $cfg[$scope].Remove($AppName)
+        Set-LinksConfig $cfg
+    }
+}
+
+function Export-LinksConfig {
+    [CmdletBinding()]
+    param ([Parameter(Mandatory)] [string]$Path)
+    Get-LinksConfig | ConvertTo-Json -Depth 10 | Set-Content $Path -Encoding UTF8
+    Write-Verbose "Link config exported to $Path"
+}
+
+function Import-LinksConfig {
+    [CmdletBinding()]
+    param ([Parameter(Mandatory)] [string]$Path, [switch]$Merge)
+    if (-not (Test-Path $Path)) { throw "File not found: $Path" }
+    $imported = Get-Content $Path -Raw | ConvertFrom-JsonAsHashtable
+    if ($Merge) {
+        $current = Get-LinksConfig
+        foreach ($scope in 'local', 'global') {
+            if ($null -ne $imported[$scope]) {
+                foreach ($key in $imported[$scope].Keys) {
+                    $current[$scope][$key] = $imported[$scope][$key]
+                }
+            }
+        }
+        Set-LinksConfig $current
+    } else {
+        Set-LinksConfig $imported
+    }
+    Write-Verbose "Link config imported from $Path"
+}
+
+#endregion

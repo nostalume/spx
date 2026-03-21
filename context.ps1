@@ -1,90 +1,21 @@
-# SPX Context - Scoop Environment Resolution
-# Provides context functions for Scoop environment
+# context.ps1 - Scoop path resolution
+# Single source of truth. Dot-source this file; never pass paths as parameters.
 
-function Get-ScoopContext {
-    [CmdletBinding()]
-    param ()
-    
-    $scoop = if ($env:SCOOP) { 
-        $env:SCOOP 
-    } else { 
-        Join-Path $env:USERPROFILE "scoop" 
-    }
-    
-    if (-not (Test-Path $scoop)) {
-        Write-Error "Scoop is not found at $scoop. Please install Scoop first." -ErrorAction Stop
-    }
-    
-    return $scoop
-}
+$Script:ScoopHome   = if ($env:SCOOP)        { $env:SCOOP }        else { Join-Path $HOME 'scoop' }
+$Script:ScoopGlobal = if ($env:SCOOP_GLOBAL) { $env:SCOOP_GLOBAL } else { 'C:\ProgramData\scoop' }
 
-function Get-ScoopGlobalContext {
-    [CmdletBinding()]
-    param ()
-    
-    $global = if ($env:SCOOP_GLOBAL) {
-        $env:SCOOP_GLOBAL
-    } else {
-        Join-Path $env:ProgramData "scoop\apps"
-    }
-    
-    return $global
-}
-
-function Get-ScoopSubdirectories {
-    [CmdletBinding()]
-    param ()
-    
-    $scoop = Get-ScoopContext
-    $global = Get-ScoopGlobalContext
-    
-    $subdirectories = @{
-        "apps"    = Join-Path $scoop "apps"
-        "global"  = $global
-        "buckets" = Join-Path $scoop "buckets"
-        "persist" = Join-Path $scoop "persist"
-        "shims"   = Join-Path $scoop "shims"
-    }
-    
-    return $subdirectories
-}
-
-function Get-SpxConfigPath {
-    [CmdletBinding()]
-    param (
-        [switch]$Global
-    )
-    
-    $scoop = Get-ScoopContext
-    $spxPath = Join-Path $scoop "spx"
-    
-    # Ensure SPX config directory exists
-    if (-not (Test-Path $spxPath)) {
-        New-Item -Path $spxPath -ItemType Directory -Force | Out-Null
-    }
-    
-    return $spxPath
+$Script:ScoopPaths = [ordered]@{
+    apps    = Join-Path $Script:ScoopHome   'apps'
+    global  = Join-Path $Script:ScoopGlobal 'apps'
+    buckets = Join-Path $Script:ScoopHome   'buckets'
+    persist = Join-Path $Script:ScoopHome   'persist'
+    shims   = Join-Path $Script:ScoopHome   'shims'
+    cache   = Join-Path $Script:ScoopHome   'cache'
+    spx     = Join-Path $Script:ScoopHome   'spx'
 }
 
 function Get-SpxConfigFile {
-    [CmdletBinding()]
-    param (
-        [Parameter(Mandatory = $true)]
-        [string]$Name,
-        
-        [switch]$CreateIfMissing
-    )
-    
-    $spxPath = Get-SpxConfigPath
-    $filePath = Join-Path $spxPath $Name
-    
-    if ($CreateIfMissing -and -not (Test-Path $filePath)) {
-        New-Item -Path $filePath -ItemType File -Force | Out-Null
-    }
-    
-    return $filePath
+    param ([string]$Name = 'spx.json', [switch]$CreateIfMissing)
+    if ($CreateIfMissing) { $null = New-Item $Script:ScoopPaths.spx -ItemType Directory -Force -ErrorAction SilentlyContinue }
+    Join-Path $Script:ScoopPaths.spx $Name
 }
-
-# Initialize script-level context variables
-$Script:ScoopSubs = Get-ScoopSubdirectories
-$Script:SpxConfigPath = Get-SpxConfigPath

@@ -15,41 +15,60 @@ concurrency:
 jobs:
   release:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Get version from tag
-        id: get_version
+      - name: Derive version strings
+        id: ver
         run: |
-          VERSION=${GITHUB_REF#refs/tags/}
-          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          # TAG  = v0.1.0  (the full git tag)
+          # VER  = 0.1.0   (no leading v — used inside the manifest)
+          TAG="${GITHUB_REF#refs/tags/}"
+          VER="${TAG#v}"
+          echo "TAG=$TAG"   >> "$GITHUB_OUTPUT"
+          echo "VER=$VER"   >> "$GITHUB_OUTPUT"
+
+          # GitHub's zip archive for tag v0.1.0 extracts as spx-0.1.0/
+          echo "EXTRACT_DIR=spx-${VER}" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.get_version.outputs.VERSION }}
-          name: SPX ${{ steps.get_version.outputs.VERSION }}
+          tag_name:         ${{ steps.ver.outputs.TAG }}
+          name:             SPX ${{ steps.ver.outputs.TAG }}
           generate_release_notes: true
-          draft: false
-          prerelease: ${{ contains(steps.get_version.outputs.VERSION, '-rc') || contains(steps.get_version.outputs.VERSION, '-beta') || contains(steps.get_version.outputs.VERSION, '-alpha') }}
+          draft:            false
+          prerelease: >-
+            ${{
+              contains(steps.ver.outputs.TAG, '-rc')   ||
+              contains(steps.ver.outputs.TAG, '-beta')  ||
+              contains(steps.ver.outputs.TAG, '-alpha')
+            }}
 
-      - name: Update Scoop manifest
+      - name: Update Scoop manifest (spx.json)
+        env:
+          TAG: ${{ steps.ver.outputs.TAG }}
+          VER: ${{ steps.ver.outputs.VER }}
+          EXTRACT_DIR: ${{ steps.ver.outputs.EXTRACT_DIR }}
         run: |
-          VERSION=${{ steps.get_version.outputs.VERSION }}
-          EXTRACT_DIR="spx-${VERSION#v}"
-          URL="https://github.com/lvyuemeng/spx/archive/refs/tags/${VERSION}.zip?download=spx.zip"
-          jq --arg version "$VERSION" --arg url "$URL" --arg extract_dir "$EXTRACT_DIR" '.version = $version | .url = $url | .extract_dir = $extract_dir' spx.json > spx.json.tmp && mv spx.json.tmp spx.json
+          URL="https://github.com/${{ github.repository }}/archive/refs/tags/${TAG}.zip"
+          jq \
+            --arg version     "$VER"         \
+            --arg url         "$URL"         \
+            --arg extract_dir "$EXTRACT_DIR" \
+            '.version = $version | .url = $url | .extract_dir = $extract_dir' \
+            spx.json > spx.json.tmp
+          mv spx.json.tmp spx.json
 
-      - name: Commit updated manifest
+      - name: Commit and push updated manifest
         run: |
-          git config user.name "github-actions[bot]"
+          git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add spx.json
-          git commit -m "chore: update scoop manifest for ${{ steps.get_version.outputs.VERSION }}" || echo "No changes to commit"
-          
-      - name: Push changes
-        run: |
+          git diff --cached --quiet \
+            || git commit -m "chore: update manifest for ${{ steps.ver.outputs.TAG }}"
           git push origin HEAD:refs/heads/main

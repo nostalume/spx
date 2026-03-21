@@ -1,34 +1,17 @@
-# SPX Unlink Command Executor
-# Handles the 'spx unlink' command
-
-param (
-    [Parameter(ValueFromRemainingArguments = $true)]
-    $Args
-)
+# exec/unlink.ps1
+param ([Parameter(ValueFromRemainingArguments)] [string[]]$Args)
 
 . "$PSScriptRoot/../lib/Parse.ps1"
 . "$PSScriptRoot/../modules/Link.ps1"
 
-Write-Debug "[unlink]: Args: $Args, Count: $($Args.Count)"
+$p      = Get-ParsedArgs $Args
+$apps   = $p.Positional
+$global = $p.Options.ContainsKey('global') -or $p.Options.ContainsKey('g')
+$wi     = $p.Options.ContainsKey('whatif')
 
-# Parse arguments
-$parsed = Get-ParsedOptions -Flags @("--global", "-g") -Arguments $Args
-$pkgs = $parsed.Packages
-$opts = $parsed.Options
+if ($apps.Count -eq 0) { Write-Host 'Usage: spx unlink <app> [<app2> ...]'; return }
 
-$global = $opts["--global"] -or $opts["-g"]
-
-Write-Debug "[unlink]: Packages: $pkgs"
-Write-Debug "[unlink]: Global: $global"
-
-# Validate required arguments
-if ($pkgs.Count -eq 0) {
-    Write-Host "Usage: spx unlink <app>"
-    Write-Host "Use 'spx link --help' for more information."
-    exit 0
-}
-
-# Execute unlink for each package
-foreach ($pkg in $pkgs) {
-    Remove-AppLink -AppName $pkg -Global:$global
+foreach ($app in $apps) {
+    $result = Remove-AppLink -AppName $app -Global:$global -WhatIf:$wi
+    if ($result) { Write-Host "[unlink] '$($result.AppName)' restored to Scoop directory." }
 }

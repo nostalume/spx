@@ -1,65 +1,30 @@
-# SPX Cleanup Command Executor
-# Handles the 'spx cleanup' command
-
-param (
-    [Parameter(ValueFromRemainingArguments = $true)]
-    $Args
-)
+# exec/cleanup.ps1
+param ([Parameter(ValueFromRemainingArguments)] [string[]]$Args)
 
 . "$PSScriptRoot/../lib/Parse.ps1"
 . "$PSScriptRoot/../modules/Link.ps1"
 
-Write-Debug "[cleanup]: Args: $Args, Count: $($Args.Count)"
+$p      = Get-ParsedArgs $Args
+$dryRun = $p.Options.ContainsKey('dry-run')
+$force  = $p.Options.ContainsKey('force')
+$stale  = @(Get-StaleLinkEntries)
 
-# Parse arguments
-$parsed = Get-ParsedOptions -Flags @("--dry-run", "--force", "--global", "-g") -Arguments $Args
-$opts = $parsed.Options
+if ($stale.Count -eq 0) { Write-Host 'No stale entries. All linked apps are valid.'; return }
 
-$dryRun = $opts["--dry-run"]
-$force = $opts["--force"]
-$global = $opts["--global"] -or $opts["-g"]
-
-Write-Debug "[cleanup]: Dry-run: $dryRun, Force: $force, Global: $global"
-
-# Get stale entries
-$stale = Get-StaleLinkEntries
-$allStale = $stale.global + $stale.local
-
-if ($allStale.Count -eq 0) {
-    Write-Host "No stale entries found. All linked apps are valid."
-    return
+Write-Host "Found $($stale.Count) stale link(s):"
+foreach ($entry in $stale) {
+    Write-Host "  [$($entry.Scope)] $($entry.AppName)  (was -> $($entry.LinkPath), v$($entry.Version))"
 }
 
-Write-Host "Found $($allStale.Count) stale entry(s):"
-Write-Host ""
-
-foreach ($entry in $allStale) {
-    $scope = if ($stale.global -contains $entry) { "global" } else { "local" }
-    Write-Host "  App: $($entry.AppName) ($scope)"
-}
-
-if ($dryRun) {
-    Write-Host ""
-    Write-Host "[dry-run] Run without --dry-run to unlink all."
-    return
-}
+if ($dryRun) { Write-Host "`n[dry-run] Nothing changed. Remove --dry-run to clean up."; return }
 
 if (-not $force) {
-    Write-Host ""
-    $response = Read-Host "Unlink all stale apps? [Y/n]: "
-    if ($response -and $response.ToLower() -ne "y") {
-        return
-    }
+    $r = Read-Host "`nRemove all stale entries? [y/N]"
+    if ($r -notmatch '^y') { Write-Host 'Aborted.'; return }
 }
 
-Write-Host "Unlinking all stale apps..."
-foreach ($entry in $allStale) {
-    $isGlobal = $stale.global -contains $entry
-    try {
-        Remove-AppLink -AppName $entry.AppName -Global:$isGlobal
-    } catch {
-        Write-Warning "Failed to unlink '$($entry.AppName)': $_"
-    }
+foreach ($entry in $stale) {
+    Remove-StaleLinkEntry -AppName $entry.AppName -Global:$entry.Global -Confirm:$false
+    Write-Host "  Removed: $($entry.AppName)"
 }
-
-Write-Host "Cleanup complete."
+Write-Host 'Cleanup complete.'

@@ -1,177 +1,122 @@
-# SPX - Scoop Power Extensions
-# CLI Entry Point
+# spx.ps1 - SPX entry point
+# Thin router. All logic lives in modules.
 
 param (
-    [Parameter(Position = 0)]
-    [string]$Command,
-    
-    [Parameter(ValueFromRemainingArguments = $true)]
-    $RemainingArgs
+    [Parameter(Position = 0)] [string]$Command,
+    [Parameter(ValueFromRemainingArguments)] [string[]]$Rest
 )
 
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = 'Stop'
 
-# Handle debug flag early
-if ($RemainingArgs -contains "-d" -or $RemainingArgs -contains "--debug" -or $RemainingArgs -contains "-Debug") {
-    $DebugPreference = "Continue"
-    $RemainingArgs = $RemainingArgs | Where-Object { $_ -notin @("-d", "--debug", "-Debug") }
+# Early debug flag
+if ($Rest -contains '-d' -or $Rest -contains '--debug') {
+    $DebugPreference = 'Continue'
+    $Rest = @($Rest | Where-Object { $_ -notin '-d','--debug' })
 }
 
-# Source dependencies
 . "$PSScriptRoot/context.ps1"
 . "$PSScriptRoot/lib/Parse.ps1"
-. "$PSScriptRoot/lib/Core.ps1"
 
-# Help system
-$helpContent = @{
+$HelpText = @{
     main = @'
-SPX - Scoop Power Extensions
+SPX - Scoop Power Extensions  v2.0
 
-Usage: spx <module> <action> [options]
+Usage: spx <command> [options]
 
-Modules:
-  link    Relocate apps to custom paths via symbolic links
-  mirror  Configure alternative download mirrors
-  source  Manage app bucket sources
+Commands:
+  link     <app> --path <dir>   Relocate app to a custom directory
+  unlink   <app>                Restore app to Scoop directory
+  linked   [--status]           List linked apps
+  sync     [<app>]              Sync version/persist state for linked apps
+  cleanup  [--dry-run]          Remove stale link entries
+  source   <action> [...]       Manage app bucket sources
+  mirror   <action> [...]       Manage bucket git remote mirrors
 
-Global Options:
-  -h, --help       Show help
-  -v, --verbose    Enable verbose output
-  -d, --debug      Enable debug output
-  --global         Operate on global apps
-  --yes            Skip confirmation prompts
+Flags (any command):
+  --global, -g    Operate on the global Scoop install
+  --whatif        Simulate without making changes
+  -d, --debug     Verbose debug output
+  -h, --help      Show help
 
-Run "spx <module> -h" for module-specific help.
+Run "spx <command> -h" for command-specific help.
 '@
-    
     link = @'
-SPX Link - Custom Path Management
-
-Usage:
-  spx link <app> --path <path>    Move app to custom path
-  spx link <app> --to <path>      Move app to custom path (alias)
-  spx unlink <app>                Restore app to Scoop directory
-  spx linked                      List all linked apps
-  spx sync [<app>]                Sync linked app states
+spx link <app> --path <dir>   Move app to a custom directory
+spx link --export <file>      Export link config to a JSON file
+spx link --import <file>      Import link config from a JSON file [--merge]
 
 Options:
-  --path, --to    Target path for the app (required for link)
-  --global        Operate on global apps
-  -h, --help      Show this help
-
-Examples:
-  spx link 7zip --path D:\MyPortableApps
-  spx unlink 7zip
-  spx linked
+  --path, --to    Target directory (must be absolute, must not contain "scoop")
+  --export        Write links.json to a file
+  --import        Load links.json from a file
+  --merge         Merge imported entries with existing config
+  --global, -g    Operate on globally installed apps
+  --whatif        Show what would happen without making changes
 '@
-    
-    mirror = @'
-SPX Mirror - Bucket URL Replacement
-
-Usage:
-  spx mirror list                    List all bucket mirrors
-  spx mirror add <bucket> <url>      Add a mirror for a bucket
-  spx mirror remove <bucket>         Remove a bucket mirror
-  spx mirror set <bucket> <url>     Set/change mirror URL for a bucket
-
-Options:
-  -h, --help      Show this help
-
-Examples:
-  spx mirror list
-  spx mirror add main https://mirror.example.com/scoop
-  spx mirror set main https://new-mirror.com/scoop
-  spx mirror remove main
+    unlink = @'
+spx unlink <app> [<app2> ...]   Restore apps to the Scoop directory
+Options: --global/-g, --whatif
 '@
-    
+    linked = @'
+spx linked [--status] [--global]
+  --status    Show Linked / Stale status for each entry
+'@
+    sync = @'
+spx sync [<app>]   Sync version and persist links for linked apps
+  Omit <app> to sync all linked apps.
+Options: --global/-g, --whatif
+'@
+    cleanup = @'
+spx cleanup [--dry-run] [--force]
+  Removes links.json entries whose app directory is missing.
+  --dry-run    Show what would be removed without acting
+  --force      Skip confirmation prompt
+'@
     source = @'
-SPX Source - Bucket Source Management
-
-Usage:
-  spx source list                         List all bucket sources
-  spx source show <app>                   Show source for an app
-  spx source change <app> <bucket>        Change source for an app
-  spx source verify <app>                 Verify source for an app
-  spx source diff <app> <bucket>           Show source difference
-  spx source add <bucket> [url]           Add a new bucket
-  spx source remove <bucket>              Remove a bucket
-
-Options:
-  -h, --help      Show this help
-
-Examples:
-  spx source list
-  spx source show 7zip
-  spx source change 7zip main
+spx source list                    List all installed apps with their bucket
+spx source show <app>              Show detailed source info
+spx source change <app> <bucket>   Re-assign app to a different bucket
+spx source verify [<app>]          Verify manifest matches registered bucket
+spx source diff <app> <bucket>     Compare installed vs bucket manifest
+spx source find <app>              Search all added buckets for the app
+Options: --force (for change), -h/--help
+'@
+    mirror = @'
+spx mirror list                  List buckets and their mirror state
+spx mirror add <bucket> <url>    Add a mirror (fails if already mirrored)
+spx mirror set <bucket> <url>    Set / change mirror URL
+spx mirror remove <bucket>       Restore original URL and clear mirror
 '@
 }
 
-function Show-Help {
-    param (
-        [string]$Context = "main"
-    )
-    
-    $help = $helpContent[$Context]
-    if (-not $help) {
-        Write-Warning "No help found for '$Context'."
-        $help = $helpContent["main"]
-    }
-    Write-Host $help
+function Show-Help { param ([string]$Ctx = 'main') Write-Host ($HelpText[$Ctx] ?? $HelpText['main']) }
+
+$Commands = @{
+    link    = 'link'
+    unlink  = 'unlink'
+    linked  = 'linked'
+    sync    = 'sync'
+    cleanup = 'cleanup'
+    source  = 'source'
+    mirror  = 'mirror'
 }
 
-# Command routing
-$commandMap = @{
-    "link"    = "link"
-    "unlink"  = "unlink"
-    "linked"  = "linked"
-    "sync"    = "sync"
-    "cleanup" = "cleanup"
-    "mirror"  = "mirror"
-    "source"  = "source"
+# $parsed = Get-ParsedArgs @($Command) + $Rest   # used only for top-level help check
+
+if (-not $Command -or $Command -in '-h','--help','/?','help') { Show-Help; return }
+
+$normalized = $Commands[$Command.ToLower()]
+
+if (-not $normalized) {
+    # Pass through to Scoop for unknown commands
+    & scoop $Command @Rest
+    return
 }
 
-$helpFlags = @("-h", "--help", "/?")
+if (Test-HelpFlag (Get-ParsedArgs $Rest)) { Show-Help -Ctx $normalized; return }
 
-# Main entry logic
-function Invoke-Main {
-    param (
-        [string]$Command,
-        $RemainingArgs
-    )
-    
-    Write-Debug "[spx]: Command: $Command"
-    Write-Debug "[spx]: Args: $($RemainingArgs -join ' ')"
-    
-    # Show main help if no command or help flag
-    if (-not $Command -or $Command -in $helpFlags) {
-        Show-Help
-        return
-    }
-    
-    # Normalize command
-    $normalized = $commandMap[$Command.ToLower()]
-    Write-Debug "[spx]: Normalized: $normalized"
-    
-    if (-not $normalized) {
-        # Fallback to scoop for unknown commands
-        & scoop $Command @RemainingArgs
-        return
-    }
-    
-    # Check for help flag in remaining args
-    if ($RemainingArgs | Where-Object { $_ -in $helpFlags }) {
-        Show-Help -Context $normalized
-        return
-    }
-    
-    # Execute module
-    $execPath = "$PSScriptRoot/exec/$normalized.ps1"
-    if (-not (Test-Path $execPath)) {
-        Write-Error "Module executor not found: $execPath" -ErrorAction Stop
-    }
-    
-    Write-Debug "[spx]: Executing: $execPath"
-    & $execPath @RemainingArgs
-}
+$execScript = "$PSScriptRoot/exec/$normalized.ps1"
+if (-not (Test-Path $execScript)) { throw "Executor not found: $execScript" }
 
-Invoke-Main -Command $Command -RemainingArgs $RemainingArgs
+Write-Debug "[spx] → $normalized  args: $($Rest -join ' ')"
+& $execScript @Rest

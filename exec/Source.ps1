@@ -1,222 +1,85 @@
-# SPX Source Executor - CLI entry point for source commands
-# Handles command-line interface for the source module
-
+# exec/source.ps1
 param (
-    [Parameter(Position = 0)]
-    [string]$Action,
-    
-    [Parameter(ValueFromRemainingArguments = $true)]
-    $RemainingArgs
+    [Parameter(Position = 0)] [string]$Action,
+    [Parameter(ValueFromRemainingArguments)] [string[]]$Rest
 )
 
-$ErrorActionPreference = "Stop"
+. "$PSScriptRoot/../lib/Parse.ps1"
+. "$PSScriptRoot/../modules/Source.ps1"
 
-# Source dependencies
-. "$PSScriptRoot\..\context.ps1"
-. "$PSScriptRoot\..\lib\Parse.ps1"
-. "$PSScriptRoot\..\lib\Core.ps1"
-. "$PSScriptRoot\..\modules\Source.ps1"
+$p     = Get-ParsedArgs $Rest
+$force = $p.Options.ContainsKey('force')
+$pos   = $p.Positional
 
-# Help content for source module
-$sourceHelp = @'
-SPX Source - Installed App Source Management
+$actionKey = if ($Action) { $Action.ToLower() } else { '' }
 
-Usage:
-  spx source list                          List all apps with their sources
-  spx source show <app>                    Show detailed source info for app
-  spx source change <app> <bucket>         Change app to different bucket
-  spx source verify [<app>]                Verify app manifest matches bucket
-  spx source diff <app> <bucket>           Compare installed vs bucket manifest
-
-Options:
-  --force          Force change even if versions differ
-  -h, --help       Show this help
-
-Examples:
-  spx source list
-  spx source show 7zip
-  spx source change 7zip extras
-  spx source verify
-  spx source diff 7zip main
-'@
-
-function Show-SourceHelp {
-    Write-Host $sourceHelp
-}
-
-function Invoke-SourceList {
-    $sources = Get-AppSourceList
-    
-    if ($sources.Count -eq 0) {
-        Write-Host "No apps installed."
-        return
+switch ($actionKey) {
+    'list' {
+        $all = @(Get-AppSourceList)
+        if ($all.Count -eq 0) { Write-Host 'No apps installed.'; return }
+        $all | Format-Table @(
+            @{ Label = 'App';     Expression = { $_.AppName };                                     Width = 22 }
+            @{ Label = 'Bucket';  Expression = { $_.Bucket  };                                     Width = 18 }
+            @{ Label = 'Version'; Expression = { $_.Version };                                     Width = 14 }
+            @{ Label = 'Scope';   Expression = { if ($_.Global) { 'global' } else { 'local' } } }
+        ) -AutoSize
     }
-    
-    Write-Host "Installed Apps:"
-    Write-Host "---------------"
-    
-    $sources | ForEach-Object {
-        $globalMark = if ($_["Global"]) { " (global)" } else { "" }
-        Write-Host "$($_['AppName'])$globalMark"
-        Write-Host "    Bucket: $($_['Bucket'])"
-        Write-Host "    Version: $($_['Version'])"
-    }
-}
 
-function Invoke-SourceShow {
-    param (
-        [string]$AppName
-    )
-    
-    if (-not $AppName) {
-        Write-Error "Usage: spx source show <app>" -ErrorAction Stop
-        return
+    'show' {
+        $app = if ($pos.Count -gt 0) { $pos[0] } else { $null }
+        if (-not $app) { Write-Error 'Usage: spx source show <app>'; return }
+        $src = Get-AppSource $app
+        if (-not $src) { return }
+        [PSCustomObject]@{
+            App         = $src.AppName
+            Bucket      = $src.Bucket
+            Version     = $src.Version
+            Scope       = if ($src.Global) { 'global' } else { 'local' }
+            InstallPath = $src.InstallPath
+        } | Format-List
     }
-    
-    $source = Get-AppSource -AppName $AppName
-    
-    if (-not $source) {
-        Write-Warning "App '$AppName' not found or has no source information."
-        return
-    }
-    
-    Write-Host "App: $($source['AppName'])"
-    Write-Host "----"
-    Write-Host "Bucket: $($source['Bucket'])"
-    Write-Host "Version: $($source['Version'])"
-    Write-Host "Global: $($source['Global'])"
-    Write-Host "Install Path: $($source['InstallPath'])"
-    
-    if ($source['URL']) {
-        Write-Host "URL: $($source['URL'])"
-    }
-}
 
-function Invoke-SourceChange {
-    param (
-        [string]$AppName,
-        [string]$Bucket,
-        [switch]$Force
-    )
-    
-    if (-not $AppName -or -not $Bucket) {
-        Write-Error "Usage: spx source change <app> <bucket>" -ErrorAction Stop
-        return
+    'change' {
+        $app    = if ($pos.Count -gt 0) { $pos[0] } else { $null }
+        $bucket = if ($pos.Count -gt 1) { $pos[1] } else { $null }
+        if (-not $app -or -not $bucket) { Write-Error 'Usage: spx source change <app> <bucket>'; return }
+        $result = Move-AppSource -AppName $app -Bucket $bucket -Force:$force
+        if ($result) { Write-Host "[source] '$($result.AppName)': '$($result.OldBucket)' -> '$($result.NewBucket)'" }
     }
-    
-    Move-AppSource -AppName $AppName -Bucket $Bucket -Force:$Force
-}
 
-function Invoke-SourceVerify {
-    param (
-        [string]$AppName
-    )
-    
-    if ($AppName) {
-        # Verify single app
-        $isValid = Test-AppSourceValid -AppName $AppName
-        
-        if ($isValid) {
-            Write-Host "[OK] '$AppName' source is valid."
-        } else {
-            Write-Host "[FAIL] '$AppName' source verification failed."
+    'verify' {
+        $apps = if ($pos.Count -gt 0) { @($pos[0]) } else { @(Get-AppSourceList | Select-Object -ExpandProperty AppName) }
+        $ok = 0; $fail = 0
+        foreach ($app in $apps) {
+            if (Test-AppSourceValid $app) { Write-Host "[OK]   $app"; $ok++ }
+            else                          { Write-Host "[FAIL] $app"; $fail++ }
         }
-    } else {
-        # Verify all apps
-        $sources = Get-AppSourceList
-        $valid = 0
-        $invalid = 0
-        
-        foreach ($source in $sources) {
-            $appName = $source['AppName']
-            $isValid = Test-AppSourceValid -AppName $appName
-            
-            if ($isValid) {
-                Write-Host "[OK] $appName"
-                $valid++
-            } else {
-                Write-Host "[FAIL] $appName"
-                $invalid++
-            }
-        }
-        
-        Write-Host ""
-        Write-Host "Summary: $valid valid, $invalid invalid"
+        if ($apps.Count -gt 1) { Write-Host "`nResult: $ok OK, $fail failed" }
     }
-}
 
-function Invoke-SourceDiff {
-    param (
-        [string]$AppName,
-        [string]$Bucket
-    )
-    
-    if (-not $AppName -or -not $Bucket) {
-        Write-Error "Usage: spx source diff <app> <bucket>" -ErrorAction Stop
-        return
+    'diff' {
+        $app    = if ($pos.Count -gt 0) { $pos[0] } else { $null }
+        $bucket = if ($pos.Count -gt 1) { $pos[1] } else { $null }
+        if (-not $app -or -not $bucket) { Write-Error 'Usage: spx source diff <app> <bucket>'; return }
+        $cmp = Compare-AppManifest -AppName $app -Bucket $bucket
+        if (-not $cmp) { return }
+        Write-Host "`n$($cmp.AppName)  [$($cmp.CurrentBucket) vs $($cmp.CompareBucket)]"
+        Write-Host "  Installed : $($cmp.InstalledVersion)"
+        Write-Host "  Bucket    : $($cmp.BucketVersion)  $(if ($cmp.VersionMatch) { '(match)' } else { '(MISMATCH)' })"
+        if ($cmp.Differences.Count -gt 0) {
+            Write-Host "`nField differences:"
+            $cmp.Differences | Format-Table Field, Installed, Bucket -AutoSize
+        } else { Write-Host 'No manifest differences.' }
     }
-    
-    $comparison = Compare-AppManifest -AppName $AppName -Bucket $Bucket
-    
-    if (-not $comparison) {
-        return
-    }
-    
-    Write-Host "Comparison: $AppName"
-    Write-Host "-----------"
-    Write-Host "Current Bucket: $($comparison['CurrentBucket'])"
-    Write-Host "Compare Bucket: $($comparison['CompareBucket'])"
-    Write-Host ""
-    Write-Host "Installed Version: $($comparison['InstalledVersion'])"
-    Write-Host "Bucket Version: $($comparison['BucketVersion'])"
-    Write-Host "Version Match: $(if ($comparison['VersionMatch']) { 'Yes' } else { 'No' })"
-    
-    if ($comparison['Differences'].Count -gt 0) {
-        Write-Host ""
-        Write-Host "Differences:"
-        foreach ($diff in $comparison['Differences']) {
-            Write-Host "  [$($diff['Key'])]"
-            Write-Host "    Installed: $($diff['Installed'])"
-            Write-Host "    Bucket: $($diff['Bucket'])"
-        }
-    } else {
-        Write-Host ""
-        Write-Host "No significant differences found."
-    }
-}
 
-# Parse arguments
-$helpFlags = @("-h", "--help", "/?")
+    'find' {
+        $app = if ($pos.Count -gt 0) { $pos[0] } else { $null }
+        if (-not $app) { Write-Error 'Usage: spx source find <app>'; return }
+        $results = @(Find-AppBucket $app)
+        if ($results.Count -eq 0) { Write-Host "'$app' not found in any added bucket."; return }
+        Write-Host "Buckets containing '$app':"
+        $results | Format-Table Bucket, Version, URL -AutoSize
+    }
 
-# Check for help flag
-if ($Action -in $helpFlags -or $RemainingArgs | Where-Object { $_ -in $helpFlags }) {
-    Show-SourceHelp
-    return
-}
-
-# Route to appropriate action
-switch ($Action.ToLower()) {
-    "list" {
-        Invoke-SourceList
-    }
-    "show" {
-        $parsed = Invoke-ParseArguments -Args $RemainingArgs
-        Invoke-SourceShow -AppName $parsed['Positional'][0]
-    }
-    "change" {
-        $parsed = Invoke-ParseArguments -Args $RemainingArgs
-        Invoke-SourceChange -AppName $parsed['Positional'][0] -Bucket $parsed['Positional'][1] `
-            -Force:($parsed.ContainsKey('force'))
-    }
-    "verify" {
-        $parsed = Invoke-ParseArguments -Args $RemainingArgs
-        Invoke-SourceVerify -AppName $parsed['Positional'][0]
-    }
-    "diff" {
-        $parsed = Invoke-ParseArguments -Args $RemainingArgs
-        Invoke-SourceDiff -AppName $parsed['Positional'][0] -Bucket $parsed['Positional'][1]
-    }
-    default {
-        Show-SourceHelp
-    }
+    default { & "$PSScriptRoot/../spx.ps1" source -h }
 }

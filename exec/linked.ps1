@@ -1,54 +1,32 @@
-# SPX Linked Command Executor
-# Handles the 'spx linked' command - lists all linked apps
-
-param (
-    [Parameter(ValueFromRemainingArguments = $true)]
-    $Args
-)
+# exec/linked.ps1
+param ([Parameter(ValueFromRemainingArguments)] [string[]]$Args)
 
 . "$PSScriptRoot/../lib/Parse.ps1"
-. "$PSScriptRoot/../lib/Config.ps1"
-. "$PSScriptRoot/../context.ps1"
+. "$PSScriptRoot/../modules/Link.ps1"
 
-Write-Debug "[linked]: Args: $Args, Count: $($Args.Count)"
+$p      = Get-ParsedArgs $Args
+$global = $p.Options.ContainsKey('global') -or $p.Options.ContainsKey('g')
+$status = $p.Options.ContainsKey('status')
+$scopes = if ($global) { @('global') } else { @('local', 'global') }
 
-# Parse arguments
-$parsed = Get-ParsedOptions -Flags @("--global", "-g") -Arguments $Args
-$opts = $parsed.Options
+$found = $false
+foreach ($scope in $scopes) {
+    $isGlobal = ($scope -eq 'global')
+    $entries  = @(Get-AppLinkStatus -Global:$isGlobal)
+    if ($entries.Count -eq 0) { continue }
 
-$global = $opts["--global"] -or $opts["-g"]
+    $found = $true
+    Write-Host "`n$($scope.ToUpper()) linked apps:"
+    Write-Host ('-' * 40)
 
-Write-Debug "[linked]: Global: $global"
-
-# Get linked apps from config
-$config = Get-LinksConfig
-
-# Display local linked apps
-if (-not $global) {
-    $localApps = $config["local"]
-    if ($localApps.Count -gt 0) {
-        Write-Host "Local linked apps:"
-        $localApps.GetEnumerator() | ForEach-Object {
-            $appName = $_.Key
-            $info = $_.Value
-            Write-Host "  $appName -> $($info.Path) (v$($info.Version))"
+    foreach ($e in $entries) {
+        if ($status) {
+            $tag = if ($e.Status -eq 'Stale') { ' [STALE]' } else { '' }
+            Write-Host ("  {0,-22} -> {1}  (v{2}){3}" -f $e.AppName, $e.TargetPath, $e.Version, $tag)
+        } else {
+            Write-Host ("  {0,-22} -> {1}  (v{2})" -f $e.AppName, $e.TargetPath, $e.Version)
         }
-    } else {
-        Write-Host "No local linked apps."
     }
 }
 
-# Display global linked apps
-if ($global -or -not $global) {
-    $globalApps = $config["global"]
-    if ($globalApps.Count -gt 0) {
-        Write-Host "`nGlobal linked apps:"
-        $globalApps.GetEnumerator() | ForEach-Object {
-            $appName = $_.Key
-            $info = $_.Value
-            Write-Host "  $appName -> $($info.Path) (v$($info.Version))"
-        }
-    } elseif ($global) {
-        Write-Host "No global linked apps."
-    }
-}
+if (-not $found) { Write-Host 'No linked apps found.' }

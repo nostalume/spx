@@ -1,120 +1,60 @@
-# SPX Config Module Tests
-# Tests for configuration management functions
+#Requires -Module Pester
+# tests/Config.Tests.ps1 - Integration tests for Config read/write layer
 
 BeforeAll {
-    # Define placeholder functions for mocking (if not already defined)
-    if (-not (Get-Command 'Get-ScoopContext' -ErrorAction SilentlyContinue)) {
-        function Get-ScoopContext { param() }
-    }
-    if (-not (Get-Command 'Get-ScoopGlobalContext' -ErrorAction SilentlyContinue)) {
-        function Get-ScoopGlobalContext { param() }
-    }
-    if (-not (Get-Command 'Get-SpxConfigPath' -ErrorAction SilentlyContinue)) {
-        function Get-SpxConfigPath { param() }
-    }
-    if (-not (Get-Command 'Get-SpxConfigFile' -ErrorAction SilentlyContinue)) {
-        function Get-SpxConfigFile { param($Name, [switch]$CreateIfMissing) }
-    }
-    
-    # Mock context functions
-    Mock Get-ScoopContext { return "TestDrive:\scoop" }
-    Mock Get-ScoopGlobalContext { return "TestDrive:\scoop\global" }
-    Mock Get-SpxConfigPath { return "TestDrive:\scoop\spx" }
-    Mock Get-SpxConfigFile { 
-        param($Name, [switch]$CreateIfMissing)
-        return "TestDrive:\scoop\spx\$Name" 
-    }
-    
-    # Source the modules
-    . "$PSScriptRoot/../context.ps1"
+    . "$PSScriptRoot/Sandbox.ps1"
+    . "$PSScriptRoot/../lib/Core.ps1"
     . "$PSScriptRoot/../lib/Config.ps1"
 }
 
-Describe "Get-LinksConfig" {
-    BeforeEach {
-        # Reset mocks for each test
-        Mock Test-Path { return $true } -ParameterFilter { $Path -like "*links.json*" }
-        Mock Get-Item { return [PSCustomObject]@{ Length = 100 } } -ParameterFilter { $Path -like "*links.json*" }
-        Mock Get-Content { 
-            return '{"global":{},"local":{"testapp":{"Path":"D:\\Apps","Version":"1.0.0"}}}'
-        } -ParameterFilter { $Path -like "*links.json*" }
+Describe 'Get-LinksConfig: empty-file and missing-file behaviour' {
+    BeforeAll { $sb = Enter-Sandbox }
+    AfterAll  { Exit-Sandbox }
+
+    It 'returns a default structure when no links.json exists' {
+        $cfg = Get-LinksConfig
+        $cfg        | Should -Not -BeNullOrEmpty
+        $cfg['local']  | Should -BeOfType [hashtable]
+        $cfg['global'] | Should -BeOfType [hashtable]
+        $cfg['local'].Count  | Should -Be 0
+        $cfg['global'].Count | Should -Be 0
     }
-    
-    It "Should return a hashtable" {
-        $result = Get-LinksConfig
-        $result | Should -BeOfType [hashtable]
-    }
-    
-    It "Should contain global and local scopes" {
-        $result = Get-LinksConfig
-        $result.ContainsKey("global") | Should -Be $true
-        $result.ContainsKey("local") | Should -Be $true
-    }
-    
-    It "Should handle malformed JSON gracefully" {
-        Mock Get-Content { return "invalid json" } -ParameterFilter { $Path -like "*links.json*" }
-        
-        $result = Get-LinksConfig
-        $result.ContainsKey("global") | Should -Be $true
-        $result.ContainsKey("local") | Should -Be $true
+
+    It 'round-trips a written config through file I/O' {
+        Set-LinkEntry -AppName 'ripgrep' -Path 'D:\Tools' -Version '14.0.0'
+        Set-LinkEntry -AppName 'fd'      -Path 'D:\Tools' -Version '10.2.0'
+        $cfg = Get-LinksConfig
+        $cfg['local']['ripgrep'].Path    | Should -Be 'D:\Tools'
+        $cfg['local']['ripgrep'].Version | Should -Be '14.0.0'
+        $cfg['local']['fd'].Version      | Should -Be '10.2.0'
     }
 }
 
-Describe "Set-LinksConfig" {
-    BeforeEach {
-        Mock Set-Content { } -ParameterFilter { $Path -like "*links.json*" }
-    }
-    
-    It "Should call Set-Content with JSON content" {
-        $config = @{
-            "global" = @{}
-            "local" = @{
-                "testapp" = @{
-                    Path = "D:\Apps"
-                    Version = "1.0.0"
-                }
-            }
-        }
-        
-        Set-LinksConfig -Config $config
-        
-        Should -Invoke Set-Content -ParameterFilter { $Path -like "*links.json*" }
-    }
-}
+Describe 'Get-SpxConfig / Set-SpxConfig: generic key-value store' {
+    BeforeAll { $sb = Enter-Sandbox }
+    AfterAll  { Exit-Sandbox }
 
-Describe "Get-AppLinkEntry" {
-    BeforeEach {
-        Mock Get-LinksConfig {
-            return @{
-                "global" = @{}
-                "local" = @{
-                    "testapp" = @{
-                        Path = "D:\Apps"
-                        Version = "1.0.0"
-                        Updated = "2024-01-01 12:00:00"
-                    }
-                }
-            }
-        }
+    It 'returns null for a missing key' {
+        Get-SpxConfig -Key 'nonexistent' | Should -BeNullOrEmpty
     }
-    
-    It "Should return entry for existing app" {
-        $result = Get-AppLinkEntry -AppName "testapp"
-        
-        $result | Should -Not -Be $null
-        $result.Path | Should -Be "D:\Apps"
-        $result.Version | Should -Be "1.0.0"
+
+    It 'writes and reads back a string value' {
+        Set-SpxConfig -Key 'testKey' -Value 'hello'
+        Get-SpxConfig -Key 'testKey' | Should -Be 'hello'
     }
-    
-    It "Should return null for non-existing app" {
-        $result = Get-AppLinkEntry -AppName "nonexistent"
-        
-        $result | Should -Be $null
+
+    It 'writes and reads back a nested hashtable' {
+        Set-SpxConfig -Key 'nested' -Value @{ a = 1; b = 'two' }
+        $val = Get-SpxConfig -Key 'nested'
+        $val['a'] | Should -Be 1
+        $val['b'] | Should -Be 'two'
     }
-    
-    It "Should respect Global switch" {
-        $result = Get-AppLinkEntry -AppName "testapp" -Global
-        
-        $result | Should -Be $null
+
+    It 'overwrites an existing key without disturbing other keys' {
+        Set-SpxConfig -Key 'key1' -Value 'original'
+        Set-SpxConfig -Key 'key2' -Value 'other'
+        Set-SpxConfig -Key 'key1' -Value 'updated'
+        Get-SpxConfig -Key 'key1' | Should -Be 'updated'
+        Get-SpxConfig -Key 'key2' | Should -Be 'other'
     }
 }

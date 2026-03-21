@@ -1,309 +1,130 @@
-# SPX Source Module Tests
-# Tests for the Source module functions using mocking
+#Requires -Module Pester
+# tests/Source.Tests.ps1 - Integration tests for Source module
 
 BeforeAll {
-    # Define placeholder functions for mocking (if not already defined)
-    if (-not (Get-Command 'Get-ScoopContext' -ErrorAction SilentlyContinue)) {
-        function Get-ScoopContext { param() }
-    }
-    if (-not (Get-Command 'Get-ScoopGlobalContext' -ErrorAction SilentlyContinue)) {
-        function Get-ScoopGlobalContext { param() }
-    }
-    if (-not (Get-Command 'Get-SpxConfigPath' -ErrorAction SilentlyContinue)) {
-        function Get-SpxConfigPath { param() }
-    }
-    if (-not (Get-Command 'Get-SpxConfigFile' -ErrorAction SilentlyContinue)) {
-        function Get-SpxConfigFile { param($Name, $CreateIfMissing) }
-    }
-    if (-not (Get-Command 'Test-AppInstalled' -ErrorAction SilentlyContinue)) {
-        function Test-AppInstalled { param($AppName, [switch]$Global) }
-    }
-    if (-not (Get-Command 'Get-AppDirectory' -ErrorAction SilentlyContinue)) {
-        function Get-AppDirectory { param($AppName, $Type, [switch]$Global, [switch]$MustExist) }
-    }
-    
-    # Source the modules
-    . "$PSScriptRoot/../context.ps1"
+    . "$PSScriptRoot/Sandbox.ps1"
     . "$PSScriptRoot/../lib/Core.ps1"
+    . "$PSScriptRoot/../modules/Source.ps1"
 }
 
-Describe "Get-AppSource" {
+Describe 'Get-AppSource: reads install.json correctly' {
     BeforeAll {
-        . "$PSScriptRoot/../lib/Source.ps1"
-        
-        # Mock functions
-        Mock Test-AppInstalled { return $true } -ParameterFilter { $AppName -eq "testapp" }
-        Mock Test-AppInstalled { return $false } -ParameterFilter { $AppName -eq "notinstalled" }
-        
-        Mock Get-AppDirectory {
-            param($AppName, $Type, [switch]$Global, [switch]$MustExist)
-            return "TestDrive:\scoop\apps\$AppName"
-        }
-        
-        # Create test app structure
-        $testAppPath = "TestDrive:\scoop\apps\testapp\1.0.0"
-        New-Item -Path $testAppPath -ItemType Directory -Force | Out-Null
-        
-        # Create install.json
-        $installJson = @{
-            bucket = "main"
-            version = "1.0.0"
-            url = "https://github.com/test/testapp"
-            manifest = @{
-                version = "1.0.0"
-                homepage = "https://example.com"
-            }
-        }
-        $installJsonPath = Join-Path $testAppPath "install.json"
-        $installJson | ConvertTo-Json -Depth 5 | Set-Content $installJsonPath -Force
-        
-        # Create current directory (not symlink for test simplicity)
-        $testCurrentPath = "TestDrive:\scoop\apps\testapp\current"
-        New-Item -Path $testCurrentPath -ItemType Directory -Force | Out-Null
-        Copy-Item $installJsonPath (Join-Path $testCurrentPath "install.json") -Force
+        $sb  = Enter-Sandbox
+        New-SandboxApp -AppName '7zip' -Version '24.8.0' -Bucket 'main'
     }
-    
-    It "Should return source info for installed app" {
-        $result = Get-AppSource -AppName "testapp"
-        
-        $result | Should -Not -BeNullOrEmpty
-        $result["AppName"] | Should -Be "testapp"
-        $result["Bucket"] | Should -Be "main"
-        $result["Version"] | Should -Be "1.0.0"
+    AfterAll { Exit-Sandbox }
+
+    It 'returns the correct bucket and version' {
+        $src = Get-AppSource -AppName '7zip'
+        $src              | Should -Not -BeNullOrEmpty
+        $src.AppName      | Should -Be '7zip'
+        $src.Bucket       | Should -Be 'main'
+        $src.Version      | Should -Be '24.8.0'
+        $src.Global       | Should -BeFalse
+        $src.InstallPath  | Should -Match 'current'
     }
-    
-    It "Should return null for non-installed app" {
-        $result = Get-AppSource -AppName "notinstalled"
+
+    It 'returns null and warns for an uninstalled app' {
+        $result = Get-AppSource -AppName 'nonexistent' -WarningAction SilentlyContinue
         $result | Should -BeNullOrEmpty
     }
 }
 
-Describe "Test-AppInBucket" {
+Describe 'Move-AppSource: rewrites install.json' {
     BeforeAll {
-        . "$PSScriptRoot/../lib/Source.ps1"
-        
-        # Create a test bucket with a manifest
-        $testBucket = "testbucket"
-        $testBucketPath = "TestDrive:\scoop\buckets\$testBucket"
-        $testBucketDir = Join-Path $testBucketPath "bucket"
-        
-        New-Item -Path $testBucketDir -ItemType Directory -Force | Out-Null
-        
-        # Create a manifest file
-        $manifestPath = Join-Path $testBucketDir "testapp.json"
-        @{ version = "1.0.0" } | ConvertTo-Json | Set-Content $manifestPath -Force
-        
-        # Mock ScoopSubs
-        $Script:ScoopSubs = @{
-            "apps"    = "TestDrive:\scoop\apps"
-            "buckets" = "TestDrive:\scoop\buckets"
-            "global"  = "TestDrive:\scoop\global"
-        }
+        $sb = Enter-Sandbox
+        New-SandboxApp -AppName 'jq' -Version '1.7.1' -Bucket 'main'
+        New-SandboxBucketManifest -BucketName 'extras' -AppName 'jq' -Version '1.7.1'
     }
-    
-    It "Should return true when app exists in bucket" {
-        $result = Test-AppInBucket -AppName "testapp" -Bucket "testbucket"
-        $result | Should -Be $true
-    }
-    
-    It "Should return false when app does not exist in bucket" {
-        $result = Test-AppInBucket -AppName "nonexistent" -Bucket "testbucket"
-        $result | Should -Be $false
-    }
-    
-    It "Should return false when bucket does not exist" {
-        $result = Test-AppInBucket -AppName "testapp" -Bucket "nonexistent"
-        $result | Should -Be $false
-    }
-}
+    AfterAll { Exit-Sandbox }
 
-Describe "Get-BucketManifest" {
-    BeforeAll {
-        . "$PSScriptRoot/../lib/Source.ps1"
-        
-        # Create a test bucket with a manifest
-        $testBucket = "manifestbucket"
-        $testBucketPath = "TestDrive:\scoop\buckets\$testBucket"
-        $testBucketDir = Join-Path $testBucketPath "bucket"
-        
-        New-Item -Path $testBucketDir -ItemType Directory -Force | Out-Null
-        
-        # Create a manifest file
-        $manifestPath = Join-Path $testBucketDir "manifestapp.json"
-        @{
-            version = "2.0.0"
-            homepage = "https://example.com/manifestapp"
-            license = "MIT"
-        } | ConvertTo-Json | Set-Content $manifestPath -Force
-        
-        # Mock ScoopSubs
-        $Script:ScoopSubs = @{
-            "apps"    = "TestDrive:\scoop\apps"
-            "buckets" = "TestDrive:\scoop\buckets"
-            "global"  = "TestDrive:\scoop\global"
-        }
+    It 'changes the bucket field in install.json' {
+        Move-AppSource -AppName 'jq' -Bucket 'extras' -Confirm:$false
+        $src = Get-AppSource -AppName 'jq'
+        $src.Bucket | Should -Be 'extras'
     }
-    
-    It "Should return manifest for existing app" {
-        $result = Get-BucketManifest -AppName "manifestapp" -Bucket "manifestbucket"
-        
-        $result | Should -Not -BeNullOrEmpty
-        $result["version"] | Should -Be "2.0.0"
-        $result["homepage"] | Should -Be "https://example.com/manifestapp"
+
+    It 'is idempotent — warns if already in target bucket' {
+        { Move-AppSource -AppName 'jq' -Bucket 'extras' -Confirm:$false -WarningAction SilentlyContinue } | Should -Not -Throw
     }
-    
-    It "Should return null for non-existing app" {
-        $result = Get-BucketManifest -AppName "nonexistent" -Bucket "manifestbucket"
+
+    It 'throws when the target bucket does not exist' {
+        { Move-AppSource -AppName 'jq' -Bucket 'nonexistent-bucket' -Confirm:$false } | Should -Throw
+    }
+
+    It 'blocks a version mismatch without -Force' {
+        # Bucket manifest has different version
+        New-SandboxBucketManifest -BucketName 'nightly' -AppName 'jq' -Version '99.0.0'
+        $result = Move-AppSource -AppName 'jq' -Bucket 'nightly' -Confirm:$false -WarningAction SilentlyContinue
+        # Should warn and return nothing (not throw)
         $result | Should -BeNullOrEmpty
+        (Get-AppSource 'jq').Bucket | Should -Be 'extras'   # unchanged
+    }
+
+    It 'proceeds past a version mismatch with -Force' {
+        Move-AppSource -AppName 'jq' -Bucket 'nightly' -Force -Confirm:$false
+        (Get-AppSource 'jq').Bucket | Should -Be 'nightly'
     }
 }
 
-Describe "Get-BucketList" {
+Describe 'Find-AppBucket: searches all buckets' {
     BeforeAll {
-        . "$PSScriptRoot/../lib/Source.ps1"
-        
-        # Create test buckets
-        $bucketsPath = "TestDrive:\scoop\buckets"
-        "bucket1", "bucket2", "bucket3" | ForEach-Object {
-            New-Item -Path (Join-Path $bucketsPath $_) -ItemType Directory -Force | Out-Null
-        }
-        
-        # Mock ScoopSubs
-        $Script:ScoopSubs = @{
-            "apps"    = "TestDrive:\scoop\apps"
-            "buckets" = $bucketsPath
-            "global"  = "TestDrive:\scoop\global"
-        }
+        $sb = Enter-Sandbox
+        New-SandboxBucketManifest -BucketName 'main'   -AppName 'curl' -Version '8.10.0'
+        New-SandboxBucketManifest -BucketName 'extras' -AppName 'curl' -Version '8.10.0'
+        New-SandboxBucketManifest -BucketName 'games'  -AppName 'other-app' -Version '1.0.0'
     }
-    
-    It "Should return list of installed buckets" {
-        $result = Get-BucketList
-        
-        $result | Should -Contain "bucket1"
-        $result | Should -Contain "bucket2"
-        $result | Should -Contain "bucket3"
+    AfterAll { Exit-Sandbox }
+
+    It 'finds app in multiple buckets' {
+        $hits = @(Find-AppBucket -AppName 'curl')
+        $hits.Count          | Should -Be 2
+        $hits.Bucket         | Should -Contain 'main'
+        $hits.Bucket         | Should -Contain 'extras'
+    }
+
+    It 'returns nothing for an app in no bucket' {
+        @(Find-AppBucket -AppName 'no-such-app') | Should -HaveCount 0
     }
 }
 
-Describe "Compare-AppManifest" {
+Describe 'Compare-AppManifest: version and field comparison' {
     BeforeAll {
-        . "$PSScriptRoot/../lib/Source.ps1"
-        
-        # Create test app with install.json
-        $testAppName = "compareapp"
-        $testAppPath = "TestDrive:\scoop\apps\$testAppName\1.0.0"
-        $testCurrentPath = "TestDrive:\scoop\apps\$testAppName\current"
-        
-        New-Item -Path $testAppPath -ItemType Directory -Force | Out-Null
-        
-        $installJson = @{
-            bucket = "main"
-            version = "1.0.0"
-            manifest = @{
-                version = "1.0.0"
-                description = "Test app"
-            }
-        }
-        $installJsonPath = Join-Path $testAppPath "install.json"
-        $installJson | ConvertTo-Json -Depth 5 | Set-Content $installJsonPath -Force
-        
-        # Create current directory (not symlink for test simplicity)
-        New-Item -Path $testCurrentPath -ItemType Directory -Force | Out-Null
-        Copy-Item $installJsonPath (Join-Path $testCurrentPath "install.json") -Force
-        
-        # Create bucket with different version
-        $testBucket = "comparebucket"
-        $testBucketPath = "TestDrive:\scoop\buckets\$testBucket"
-        $testBucketDir = Join-Path $testBucketPath "bucket"
-        
-        New-Item -Path $testBucketDir -ItemType Directory -Force | Out-Null
-        
-        $manifestPath = Join-Path $testBucketDir "$testAppName.json"
-        @{
-            version = "2.0.0"
-            description = "Updated test app"
-        } | ConvertTo-Json | Set-Content $manifestPath -Force
-        
-        Mock Test-AppInstalled { return $true } -ParameterFilter { $AppName -eq "compareapp" }
-        Mock Get-AppDirectory {
-            param($AppName, $Type, [switch]$Global, [switch]$MustExist)
-            return "TestDrive:\scoop\apps\$AppName"
-        }
-        
-        # Mock ScoopSubs
-        $Script:ScoopSubs = @{
-            "apps"    = "TestDrive:\scoop\apps"
-            "buckets" = "TestDrive:\scoop\buckets"
-            "global"  = "TestDrive:\scoop\global"
-        }
+        $sb = Enter-Sandbox
+        New-SandboxApp -AppName 'bat' -Version '0.24.0' -Bucket 'main'
+        New-SandboxBucketManifest -BucketName 'main'   -AppName 'bat' -Version '0.24.0'
+        New-SandboxBucketManifest -BucketName 'extras' -AppName 'bat' -Version '0.25.0'
     }
-    
-    It "Should compare installed and bucket manifests" {
-        $result = Compare-AppManifest -AppName "compareapp" -Bucket "comparebucket"
-        
-        $result | Should -Not -BeNullOrEmpty
-        $result["InstalledVersion"] | Should -Be "1.0.0"
-        $result["BucketVersion"] | Should -Be "2.0.0"
-        $result["VersionMatch"] | Should -Be $false
+    AfterAll { Exit-Sandbox }
+
+    It 'reports VersionMatch=true when versions align' {
+        $cmp = Compare-AppManifest -AppName 'bat' -Bucket 'main'
+        $cmp.VersionMatch | Should -BeTrue
+    }
+
+    It 'reports VersionMatch=false when bucket has a newer version' {
+        $cmp = Compare-AppManifest -AppName 'bat' -Bucket 'extras'
+        $cmp.VersionMatch     | Should -BeFalse
+        $cmp.InstalledVersion | Should -Be '0.24.0'
+        $cmp.BucketVersion    | Should -Be '0.25.0'
     }
 }
 
-Describe "Test-AppSourceValid" {
+Describe 'Test-AppSourceValid' {
     BeforeAll {
-        . "$PSScriptRoot/../lib/Source.ps1"
-        
-        # Create valid app
-        $validApp = "validapp"
-        $validAppPath = "TestDrive:\scoop\apps\$validApp\1.0.0"
-        $validCurrentPath = "TestDrive:\scoop\apps\$validApp\current"
-        
-        New-Item -Path $validAppPath -ItemType Directory -Force | Out-Null
-        
-        $installJson = @{
-            bucket = "validbucket"
-            version = "1.0.0"
-            manifest = @{
-                version = "1.0.0"
-            }
-        }
-        $installJsonPath = Join-Path $validAppPath "install.json"
-        $installJson | ConvertTo-Json -Depth 5 | Set-Content $installJsonPath -Force
-        
-        # Create current directory (not symlink for test simplicity)
-        New-Item -Path $validCurrentPath -ItemType Directory -Force | Out-Null
-        Copy-Item $installJsonPath (Join-Path $validCurrentPath "install.json") -Force
-        
-        # Create bucket with matching manifest
-        $validBucketPath = "TestDrive:\scoop\buckets\validbucket"
-        $validBucketDir = Join-Path $validBucketPath "bucket"
-        
-        New-Item -Path $validBucketDir -ItemType Directory -Force | Out-Null
-        
-        $manifestPath = Join-Path $validBucketDir "$validApp.json"
-        @{ version = "1.0.0" } | ConvertTo-Json | Set-Content $manifestPath -Force
-        
-        Mock Test-AppInstalled { return $true } -ParameterFilter { $AppName -eq "validapp" }
-        Mock Test-AppInstalled { return $false } -ParameterFilter { $AppName -eq "invalidapp" }
-        Mock Get-AppDirectory {
-            param($AppName, $Type, [switch]$Global, [switch]$MustExist)
-            return "TestDrive:\scoop\apps\$AppName"
-        }
-        
-        # Mock ScoopSubs
-        $Script:ScoopSubs = @{
-            "apps"    = "TestDrive:\scoop\apps"
-            "buckets" = "TestDrive:\scoop\buckets"
-            "global"  = "TestDrive:\scoop\global"
-        }
+        $sb = Enter-Sandbox
+        New-SandboxApp -AppName 'fzf' -Version '0.55.0' -Bucket 'main'
+        New-SandboxBucketManifest -BucketName 'main' -AppName 'fzf' -Version '0.55.0'
     }
-    
-    It "Should return true for valid app source" {
-        $result = Test-AppSourceValid -AppName "validapp"
-        $result | Should -Be $true
+    AfterAll { Exit-Sandbox }
+
+    It 'returns true when app, bucket, and version all match' {
+        Test-AppSourceValid -AppName 'fzf' | Should -BeTrue
     }
-    
-    It "Should return false for non-existent app" {
-        $result = Test-AppSourceValid -AppName "invalidapp"
-        $result | Should -Be $false
+
+    It 'returns false when the bucket does not exist' {
+        # Remove bucket dir
+        Remove-Item (Join-Path $env:SCOOP 'buckets\main') -Recurse -Force
+        Test-AppSourceValid -AppName 'fzf' -WarningAction SilentlyContinue | Should -BeFalse
     }
 }
