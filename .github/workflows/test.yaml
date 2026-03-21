@@ -1,0 +1,41 @@
+name: Test
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  test:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Pester
+        shell: pwsh
+        run: |
+          # Install Pester if not already installed
+          if (-not (Get-Module -ListAvailable -Name Pester)) {
+            Write-Host "Installing Pester..."
+            Install-Module -Name Pester -Force -SkipPublisherCheck -Scope CurrentUser
+          } else {
+            Write-Host "Pester already installed: $(Get-Module -Name Pester -ListAvailable | Select-Object -First 1 | Select-Object -ExpandProperty Version)"
+          }
+          # Ensure latest version is loaded
+          Import-Module Pester -MinimumVersion 5.0.0 -ErrorAction Stop
+
+      - name: Run Pester tests
+        shell: pwsh
+        run: |
+          Import-Module Pester -MinimumVersion 5.0.0 -ErrorAction Stop
+          
+          # Run tests with detailed output
+          $Configuration = [PesterConfiguration]::new()
+          $Configuration.Run.Path = 'tests'
+          $Configuration.Output.Verbosity = 'Detailed'
+          
+          Write-Host "Running Pester tests..." -ForegroundColor Cyan
+          Invoke-Pester -Configuration $Configuration
