@@ -1,152 +1,80 @@
 #Requires -Module Pester
-# tests/Mirror.Tests.ps1 - Integration tests for Mirror module
-# git operations are mocked; config read/write is tested against a real sandbox.
 
-BeforeAll {
-    . "$PSScriptRoot/Sandbox.ps1"
-    . "$PSScriptRoot/../lib/Core.ps1"
-    . "$PSScriptRoot/../lib/Config.ps1"
-    . "$PSScriptRoot/../modules/Mirror.ps1"
+Describe 'SPX recoverable bucket mirrors' {
+    BeforeAll { . "$PSScriptRoot/TestSupport.ps1"; Import-Module (Join-Path $PSScriptRoot '..\SPX.psd1') -Force }
+    BeforeEach { $sb = Enter-SpxTestSandbox -Root (Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))) }
+    AfterEach { Exit-SpxTestSandbox }
 
-    # Mock git so tests run without a real git repo
-    Mock Get-BucketRemoteUrl { return 'https://github.com/ScoopInstaller/Main' }
-    Mock Set-BucketRemoteUrl {}
-}
-
-Describe 'Set-BucketMirror: add semantics' {
-    BeforeAll {
-        $sb = Enter-Sandbox
-        New-SandboxBucketDir -Name 'main'
-    }
-    AfterAll { Exit-Sandbox }
-
-    It 'saves original and mirror URLs in spx.json' {
-        $r = Set-BucketMirror -BucketName 'main' -Url 'https://mirror.example.com/main' -Add
-        $r.MirrorURL   | Should -Be 'https://mirror.example.com/main'
-        $r.OriginalURL | Should -Be 'https://github.com/ScoopInstaller/Main'
-
-        $saved = Get-SpxConfig -Key 'mirrors'
-        $saved            | Should -Not -BeNullOrEmpty
-        $saved['main']    | Should -Not -BeNullOrEmpty
-        $saved['main']['mirror']   | Should -Be 'https://mirror.example.com/main'
-        $saved['main']['original'] | Should -Be 'https://github.com/ScoopInstaller/Main'
+    It 'checks Git, commits observed mirror state, and restores the original' {
+        New-SpxTestGitBucket main 'https://origin.example/main.git' | Out-Null
+        $set = New-SpxBucketMirror main 'https://mirror.example/main.git' -Confirm:$false
+        $set.Status | Should -Be Configured
+        (Get-SpxBucketMirror main).CurrentUrl | Should -Be 'https://mirror.example/main.git'
+        $remove = Remove-SpxBucketMirror main -Confirm:$false
+        $remove.Status | Should -Be Restored
+        (Get-SpxBucketMirror main).CurrentUrl | Should -Be 'https://origin.example/main.git'
     }
 
-    It 'throws on -Add when a mirror already exists' {
-        { Set-BucketMirror -BucketName 'main' -Url 'https://other.mirror.com' -Add } | Should -Throw
-    }
-}
-
-Describe 'Set-BucketMirror: set semantics (overwrite)' {
-    BeforeAll {
-        $sb = Enter-Sandbox
-        New-SandboxBucketDir -Name 'extras'
-        # Seed an existing mirror entry
-        Set-SpxConfig -Key 'mirrors' -Value @{
-            extras = @{ original = 'https://github.com/ScoopInstaller/Extras'; mirror = 'https://old.mirror.com' }
-        }
-    }
-    AfterAll { Exit-Sandbox }
-
-    It 'updates mirror URL but preserves the original' {
-        $r = Set-BucketMirror -BucketName 'extras' -Url 'https://new.mirror.com'
-        $r.MirrorURL   | Should -Be 'https://new.mirror.com'
-        $r.OriginalURL | Should -Be 'https://github.com/ScoopInstaller/Extras'
-
-        $saved = (Get-SpxConfig -Key 'mirrors')['extras']
-        $saved['mirror']   | Should -Be 'https://new.mirror.com'
-        $saved['original'] | Should -Be 'https://github.com/ScoopInstaller/Extras'
-    }
-}
-
-Describe 'Remove-BucketMirror: restores original URL' {
-    BeforeAll {
-        $sb = Enter-Sandbox
-        New-SandboxBucketDir -Name 'versions'
-        Set-SpxConfig -Key 'mirrors' -Value @{
-            versions = @{ original = 'https://github.com/ScoopInstaller/Versions'; mirror = 'https://fast.mirror.com' }
-        }
-    }
-    AfterAll { Exit-Sandbox }
-
-    It 'calls Set-BucketRemoteUrl with the original URL' {
-        Remove-BucketMirror -BucketName 'versions' -Confirm:$false
-        Assert-MockCalled Set-BucketRemoteUrl -Times 1 -ParameterFilter {
-            $Url -eq 'https://github.com/ScoopInstaller/Versions'
-        }
+    It 'does not mutate Git or config under WhatIf' {
+        New-SpxTestGitBucket main 'https://origin.example/main.git' | Out-Null
+        New-SpxBucketMirror main 'https://mirror.example/main.git' -WhatIf
+        (Get-SpxBucketMirror main).CurrentUrl | Should -Be 'https://origin.example/main.git'
+        Test-Path (Join-Path $env:SCOOP 'spx\spx.json') | Should -BeFalse
     }
 
-    It 'removes the bucket entry from spx.json' {
-        $saved = Get-SpxConfig -Key 'mirrors'
-        $saved.ContainsKey('versions') | Should -BeFalse
+    It 'refuses malformed config rather than normalizing it' {
+        $dir = Join-Path $env:SCOOP 'spx'; $null = New-Item -ItemType Directory -Path $dir -Force
+        [IO.File]::WriteAllText((Join-Path $dir 'spx.json'), '{broken')
+        { Get-SpxBucketMirror } | Should -Throw
+        [IO.File]::ReadAllText((Join-Path $dir 'spx.json')) | Should -Be '{broken'
     }
 
-    It 'throws when no mirror is configured for the bucket' {
-        { Remove-BucketMirror -BucketName 'versions' -Confirm:$false } | Should -Throw
-    }
-}
-
-Describe 'Get-BucketMirror: listing' {
-    BeforeAll {
-        $sb = Enter-Sandbox
-        New-SandboxBucketDir -Name 'main'
-        New-SandboxBucketDir -Name 'extras'
-        Set-SpxConfig -Key 'mirrors' -Value @{
-            main = @{ original = 'https://github.com/ScoopInstaller/Main'; mirror = 'https://cn.mirror.com/main' }
-        }
-    }
-    AfterAll { Exit-Sandbox }
-
-    It 'returns one result per bucket' {
-        $results = @(Get-BucketMirror)
-        $results.Count | Should -Be 2
+    It 'rejects non-Git buckets without writing committed state' {
+        New-SpxTestBucket -Name plain | Out-Null
+        { New-SpxBucketMirror plain 'https://mirror.example/plain.git' -Confirm:$false } | Should -Throw
+        Test-Path (Join-Path $env:SCOOP 'spx\spx.json') | Should -BeFalse
     }
 
-    It 'marks mirrored bucket correctly' {
-        $main = @(Get-BucketMirror) | Where-Object { $_.Bucket -eq 'main' }
-        $main.IsMirrored | Should -BeTrue
-        $main.MirrorURL  | Should -Be 'https://cn.mirror.com/main'
+    It 'reports and rolls forward an interrupted observed Git change' {
+        $bucket = New-SpxTestGitBucket main 'https://origin.example/main.git'
+        & git -C $bucket remote set-url origin 'https://mirror.example/main.git'
+        $operation = [ordered]@{schema = 1; id = 'mirror-op'; kind = 'mirror'; bucket = 'main'; action = 'New'; phase = 'GitChanged'; oldUrl = 'https://origin.example/main.git'; originalUrl = 'https://origin.example/main.git'; requestedUrl = 'https://mirror.example/main.git' }
+        $opDir = Join-Path $env:SCOOP 'spx\operations\mirror'; $null = New-Item -ItemType Directory -Path $opDir -Force
+        $operation | ConvertTo-Json | Set-Content (Join-Path $opDir 'main.json') -Encoding UTF8
+        (Get-SpxBucketMirror main).State | Should -Be PendingRecovery
+        (Repair-SpxBucketMirror main -Confirm:$false).Status | Should -Be Completed
+        (Get-SpxBucketMirror main).IsMirrored | Should -BeTrue
+        Test-Path (Join-Path $opDir 'main.json') | Should -BeFalse
     }
 
-    It 'marks un-mirrored bucket correctly' {
-        $extras = @(Get-BucketMirror) | Where-Object { $_.Bucket -eq 'extras' }
-        $extras.IsMirrored | Should -BeFalse
-        $extras.MirrorURL  | Should -BeNullOrEmpty
+    It 'rolls back a prepared mirror whose Git effect was not observed' {
+        New-SpxTestGitBucket main 'https://origin.example/main.git' | Out-Null
+        $operation = [ordered]@{schema = 1; id = 'mirror-op'; kind = 'mirror'; bucket = 'main'; action = 'New'; phase = 'Prepared'; oldUrl = 'https://origin.example/main.git'; originalUrl = 'https://origin.example/main.git'; requestedUrl = 'https://mirror.example/main.git' }
+        $opDir = Join-Path $env:SCOOP 'spx\operations\mirror'; $null = New-Item -ItemType Directory -Path $opDir -Force
+        $operation | ConvertTo-Json | Set-Content (Join-Path $opDir 'main.json') -Encoding UTF8
+        { New-SpxBucketMirror main 'https://replacement.example/main.git' -Confirm:$false } | Should -Throw -ErrorId 'Spx.PendingRecovery*'
+        (Get-Content (Join-Path $opDir 'main.json') -Raw | ConvertFrom-Json).id | Should -Be mirror-op
+        (Repair-SpxBucketMirror main -Confirm:$false).Status | Should -Be RolledBack
+        (Get-SpxBucketMirror main).CurrentUrl | Should -Be 'https://origin.example/main.git'
     }
 
-    It 'returns a single bucket when BucketName is specified' {
-        $result = @(Get-BucketMirror -BucketName 'main')
-        $result.Count    | Should -Be 1
-        $result[0].Bucket | Should -Be 'main'
+    It 'compensates Git and preserves recovery evidence when config is contended' {
+        New-SpxTestGitBucket main 'https://origin.example/main.git' | Out-Null
+        $config = Join-Path $env:SCOOP 'spx\spx.json'; $null = New-Item -ItemType Directory -Path (Split-Path $config -Parent) -Force
+        $holder = [IO.File]::Open($config + '.lock', [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+        try { { New-SpxBucketMirror main 'https://mirror.example/main.git' -Confirm:$false } | Should -Throw }
+        finally { $holder.Dispose() }
+        (Get-SpxBucketMirror main).CurrentUrl | Should -Be 'https://origin.example/main.git'
+        (Get-SpxBucketMirror main).State | Should -Be PendingRecovery
+        (Repair-SpxBucketMirror main -Confirm:$false).Status | Should -Be RolledBack
     }
 
-    It 'warns and returns nothing for an unknown bucket' {
-        $result = Get-BucketMirror -BucketName 'no-such-bucket' -WarningAction SilentlyContinue
-        $result | Should -BeNullOrEmpty
-    }
-}
-
-Describe 'Mirror config survives multiple write cycles' {
-    BeforeAll {
-        $sb = Enter-Sandbox
-        New-SandboxBucketDir -Name 'main'
-        New-SandboxBucketDir -Name 'extras'
-    }
-    AfterAll { Exit-Sandbox }
-
-    It 'retains independent entries for two buckets' {
-        Set-BucketMirror -BucketName 'main'   -Url 'https://m1.example.com'
-        Set-BucketMirror -BucketName 'extras' -Url 'https://m2.example.com'
-
-        $cfg = Get-SpxConfig -Key 'mirrors'
-        $cfg['main']['mirror']   | Should -Be 'https://m1.example.com'
-        $cfg['extras']['mirror'] | Should -Be 'https://m2.example.com'
-    }
-
-    It 'removing one does not affect the other' {
-        Remove-BucketMirror -BucketName 'main' -Confirm:$false
-        $cfg = Get-SpxConfig -Key 'mirrors'
-        $cfg.ContainsKey('main')   | Should -BeFalse
-        $cfg.ContainsKey('extras') | Should -BeTrue
+    It 'reports observed remote drift without mutating it' {
+        $bucket = New-SpxTestGitBucket main 'https://origin.example/main.git'
+        New-SpxBucketMirror main 'https://mirror.example/main.git' -Confirm:$false | Out-Null
+        & git -C $bucket remote set-url origin 'https://other.example/main.git'
+        $status = Get-SpxBucketMirror main
+        $status.State | Should -Be Drifted
+        $status.CurrentUrl | Should -Be 'https://other.example/main.git'
     }
 }

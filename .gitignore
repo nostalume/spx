@@ -1,7 +1,28 @@
-# config
-apps.json
-manifest.json
+# Local SPX/Scoop state
+/apps.json
+/manifest.json
+/test_apps/
+/test_apps_dst/
 
-# test
-test_apps/
-test_apps_dst/
+# Test and coverage output
+/TestResults/
+/coverage/
+/coverage.xml
+/*.trx
+
+# Private agent workspaces
+/.agents/
+/.codex/
+
+# Editor and operating-system residue
+/.idea/
+/.vscode/
+*.swp
+*~
+.DS_Store
+Desktop.ini
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp

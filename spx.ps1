@@ -1,122 +1,119 @@
-# spx.ps1 - SPX entry point
-# Thin router. All logic lives in modules.
+#Requires -Version 5.1
 
+<#
+.SYNOPSIS
+Runs SPX as a Scoop-style script command.
+
+.DESCRIPTION
+Uses native PowerShell parameter binding, validates the selected SPX subcommand,
+and delegates to the retained SPX module transaction engine.
+
+.PARAMETER Command
+Top-level command: link, unlink, linked, sync, repair, cleanup, config, source,
+mirror, or help.
+
+.PARAMETER Arguments
+Command action and app or bucket identities.
+
+.PARAMETER Destination
+Destination root used by the link command.
+
+.PARAMETER Scope
+Scoop scope. Each command admits only its documented values.
+
+.PARAMETER Path
+Configuration import or export path.
+
+.PARAMETER Bucket
+Bucket selected by source commands.
+
+.PARAMETER Url
+Git remote URL selected by mirror commands.
+
+.PARAMETER Force
+Permits the documented source or export override.
+
+.PARAMETER Merge
+Merges imported link configuration.
+
+.PARAMETER Help
+Displays root or command-specific help without importing the SPX module.
+
+.PARAMETER Version
+Displays the package version without importing the SPX module.
+
+.EXAMPLE
+spx link jq -Destination 'D:\Portable Apps' -Scope Local -WhatIf
+
+.EXAMPLE
+spx source set jq -Bucket extras -Force
+#>
+[CmdletBinding(SupportsShouldProcess)]
 param (
-    [Parameter(Position = 0)] [string]$Command,
-    [Parameter(ValueFromRemainingArguments)] [string[]]$Rest
+    [Parameter(Position = 0)][string]$Command,
+    [Parameter(Position = 1, ValueFromRemainingArguments)][string[]]$Arguments,
+    [string]$Destination,
+    [ValidateSet('Local', 'Global', 'All')][string]$Scope,
+    [string]$Path,
+    [string]$Bucket,
+    [string]$Url,
+    [switch]$Force,
+    [switch]$Merge,
+    [switch]$Help,
+    [switch]$Version
 )
 
 $ErrorActionPreference = 'Stop'
+. "$PSScriptRoot/lib/Cli.ps1"
 
-# Early debug flag
-if ($Rest -contains '-d' -or $Rest -contains '--debug') {
-    $DebugPreference = 'Continue'
-    $Rest = @($Rest | Where-Object { $_ -notin '-d','--debug' })
-}
+$passiveCommon = @(
+    'Verbose', 'Debug', 'ErrorAction', 'WarningAction', 'InformationAction',
+    'ErrorVariable', 'WarningVariable', 'InformationVariable', 'OutVariable',
+    'OutBuffer', 'PipelineVariable', 'ProgressAction'
+)
 
-. "$PSScriptRoot/context.ps1"
-. "$PSScriptRoot/lib/Parse.ps1"
-
-$HelpText = @{
-    main = @'
-SPX - Scoop Power Extensions  v2.0
-
-Usage: spx <command> [options]
-
-Commands:
-  link     <app> --path <dir>   Relocate app to a custom directory
-  unlink   <app>                Restore app to Scoop directory
-  linked   [--status]           List linked apps
-  sync     [<app>]              Sync version/persist state for linked apps
-  cleanup  [--dry-run]          Remove stale link entries
-  source   <action> [...]       Manage app bucket sources
-  mirror   <action> [...]       Manage bucket git remote mirrors
-
-Flags (any command):
-  --global, -g    Operate on the global Scoop install
-  --whatif        Simulate without making changes
-  -d, --debug     Verbose debug output
-  -h, --help      Show help
-
-Run "spx <command> -h" for command-specific help.
-'@
-    link = @'
-spx link <app> --path <dir>   Move app to a custom directory
-spx link --export <file>      Export link config to a JSON file
-spx link --import <file>      Import link config from a JSON file [--merge]
-
-Options:
-  --path, --to    Target directory (must be absolute, must not contain "scoop")
-  --export        Write links.json to a file
-  --import        Load links.json from a file
-  --merge         Merge imported entries with existing config
-  --global, -g    Operate on globally installed apps
-  --whatif        Show what would happen without making changes
-'@
-    unlink = @'
-spx unlink <app> [<app2> ...]   Restore apps to the Scoop directory
-Options: --global/-g, --whatif
-'@
-    linked = @'
-spx linked [--status] [--global]
-  --status    Show Linked / Stale status for each entry
-'@
-    sync = @'
-spx sync [<app>]   Sync version and persist links for linked apps
-  Omit <app> to sync all linked apps.
-Options: --global/-g, --whatif
-'@
-    cleanup = @'
-spx cleanup [--dry-run] [--force]
-  Removes links.json entries whose app directory is missing.
-  --dry-run    Show what would be removed without acting
-  --force      Skip confirmation prompt
-'@
-    source = @'
-spx source list                    List all installed apps with their bucket
-spx source show <app>              Show detailed source info
-spx source change <app> <bucket>   Re-assign app to a different bucket
-spx source verify [<app>]          Verify manifest matches registered bucket
-spx source diff <app> <bucket>     Compare installed vs bucket manifest
-spx source find <app>              Search all added buckets for the app
-Options: --force (for change), -h/--help
-'@
-    mirror = @'
-spx mirror list                  List buckets and their mirror state
-spx mirror add <bucket> <url>    Add a mirror (fails if already mirrored)
-spx mirror set <bucket> <url>    Set / change mirror URL
-spx mirror remove <bucket>       Restore original URL and clear mirror
-'@
-}
-
-function Show-Help { param ([string]$Ctx = 'main') Write-Host ($HelpText[$Ctx] ?? $HelpText['main']) }
-
-$Commands = @{
-    link    = 'link'
-    unlink  = 'unlink'
-    linked  = 'linked'
-    sync    = 'sync'
-    cleanup = 'cleanup'
-    source  = 'source'
-    mirror  = 'mirror'
-}
-
-# $parsed = Get-ParsedArgs @($Command) + $Rest   # used only for top-level help check
-
-if (-not $Command -or $Command -in '-h','--help','/?','help') { Show-Help; return }
-
-$normalized = $Commands[$Command.ToLower()]
-
-if (-not $normalized) {
-    # Pass through to Scoop for unknown commands
-    & scoop $Command @Rest
+if ($Version) {
+    $invalid = @($PSBoundParameters.Keys | Where-Object { $_ -notin @('Version') -and $_ -notin $passiveCommon })
+    if ($invalid.Count) {
+        Stop-SpxCliUsage "-Version cannot be combined with '-$($invalid[0])'." $invalid[0]
+    }
+    $manifest = Import-PowerShellDataFile (Join-Path $PSScriptRoot 'SPX.psd1')
+    [string]$manifest.ModuleVersion
     return
 }
 
-if (Test-HelpFlag (Get-ParsedArgs $Rest)) { Show-Help -Ctx $normalized; return }
+if (-not $Command) {
+    if (($PSBoundParameters.Keys | Where-Object { $_ -notin @('Help') -and $_ -notin $passiveCommon }).Count) {
+        Stop-SpxCliUsage "A command is required. Run 'spx -Help'." $PSBoundParameters
+    }
+    Get-SpxCliHelp
+    return
+}
 
-$execScript = "$PSScriptRoot/exec/$normalized.ps1"
-if (-not (Test-Path $execScript)) { throw "Executor not found: $execScript" }
+if ($Command.Equals('help', [StringComparison]::OrdinalIgnoreCase)) {
+    $invalid = @($PSBoundParameters.Keys | Where-Object { $_ -notin @('Command', 'Arguments') -and $_ -notin $passiveCommon })
+    if ($invalid.Count) {
+        Stop-SpxCliUsage "Parameter '-$($invalid[0])' is not valid for 'help'." $invalid[0]
+    }
+    if ($Arguments.Count -eq 0) {
+        Get-SpxCliHelp
+    }
+    else {
+        Get-SpxCliHelp -Command $Arguments[0] -Arguments @($Arguments | Select-Object -Skip 1)
+    }
+    return
+}
 
-Write-Debug "[spx] → $normalized  args: $($Rest -join ' ')"
-& $execScript @Rest
+if ($Help) {
+    $resolved = Resolve-SpxCliLeaf -Command $Command -Arguments $Arguments
+    $allowed = @('Command', 'Arguments', 'Help') + @($resolved.Leaf.Parameters) + $passiveCommon
+    $invalid = @($PSBoundParameters.Keys | Where-Object { $_ -notin $allowed })
+    if ($invalid.Count) {
+        Stop-SpxCliUsage "Parameter '-$($invalid[0])' is not valid for '$($resolved.Key.Replace('/', ' '))'." $invalid[0]
+    }
+    Get-SpxCliHelp -Command $Command -Arguments $Arguments
+    return
+}
+
+$resolved = Resolve-SpxCliLeaf -Command $Command -Arguments $Arguments
+Invoke-SpxCli -RepositoryRoot $PSScriptRoot -Resolved $resolved -BoundParameters $PSBoundParameters

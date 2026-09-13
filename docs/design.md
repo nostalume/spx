@@ -1,292 +1,76 @@
-# SPX - Scoop Power Extensions
+# SPX design
 
-## Project Overview
+## Product boundary
 
-**SPX** (Scoop Power Extensions) is a PowerShell enhancement toolkit for Scoop.
+SPX extends Scoop; it does not become another package manager. The primary surface is the packaged
+`spx.ps1` command. `SPX.psd1` retains an 18-function module for automation and is the only domain
+engine. The CLI owns grammar and admission, never Scoop layout, transaction policy, Git/filesystem
+effects, or recovery decisions.
 
-### Design Philosophy
-
-1. **Orthogonality** - Features complement Scoop without duplication
-2. **Modularity** - Independent modules with clear boundaries
-3. **Safety First** - Destructive ops require confirmation; reversible
-4. **Transparency** - Clear logging and status reporting
-5. **Stateless by Default** - Don't record state unless necessary
-
----
-
-## Architecture
-
-```
-spx/
-├── spx.ps1              # CLI entry point (thin router)
-├── context.ps1          # Scoop path resolution (single source of truth)
-├── lib/
-│   ├── Core.ps1         # Shared utilities (JSON, admin, app helpers, file ops)
-│   ├── Parse.ps1       # CLI argument parsing
-│   └── Config.ps1      # Configuration I/O (spx.json, links.json)
-├── modules/
-│   ├── Link.ps1        # App relocation via symbolic links
-│   ├── Mirror.ps1     # Bucket git remote mirror management
-│   └── Source.ps1     # App bucket source management (stateless)
-├── exec/
-│   ├── link.ps1       # link command
-│   ├── unlink.ps1     # unlink command
-│   ├── linked.ps1     # linked command
-│   ├── sync.ps1       # sync command
-│   ├── cleanup.ps1    # cleanup command (remove stale link entries)
-│   ├── source.ps1     # source command
-│   └── mirror.ps1     # mirror command
-└── tests/
-    └── Sandbox.ps1    # Test helper for isolated testing
+```text
+Scoop shim -> spx.ps1 (native binder/process entry)
+  -> lib/Cli.ps1 (leaf specification, validation, help, one dispatch)
+    -> SPX.psm1 (effect-neutral facade and exact export allow-list)
+      -> domain/Link.ps1   -> lib/ScoopState.ps1
+      -> domain/Source.ps1 -> lib/ScoopState.ps1
+      -> domain/Mirror.ps1 -> lib/Config.ps1
+        -> lib/Context.ps1 + lib/Core.ps1
 ```
 
-### Design Pattern
+PowerShell binds declared parameters once. The CLI validates the selected leaf once and calls one
+exported function once. There is no raw argv parser, per-command executor layer, or alternate
+domain API. Operational output remains the module's PowerShell objects rather than a second schema.
 
-- **spx.ps1**: Thin router that dispatches to `exec/*.ps1` scripts
-- **lib/**: Reusable libraries (Config, Core, Parse)
-- **modules/**: Business logic modules with public APIs
-- **exec/**: CLI command implementations that compose modules
-- **context.ps1**: Single source of truth for Scoop paths
+## Owners
 
----
+- `spx.ps1`: bounded native parameters, help/version fast paths, and process entry.
+- `lib/Cli.ps1`: immutable command grammar, leaf-specific admission, help, and dispatch mapping.
+- `lib/Context.ps1`: runtime Scoop/SPX root resolution; no import-time directory creation.
+- `lib/ScoopState.ps1`: sole adapter for installed app layout, scope, current version, manifests,
+  and persist roots.
+- `lib/Config.ps1`: schema admission, bounded locking, atomic JSON generations, and journals.
+- `lib/Core.ps1`: contained paths, checked links/copies/fingerprints, Git-neutral primitives, and
+  typed/error helpers.
+- `domain/`: relocation, source, and mirror policies plus their effect sequences.
 
-## Context - Scoop Path Resolution
+An owner is split only when a genuinely independent consumer or change lifecycle appears. Domain
+code may not independently infer a new Scoop layout; extend the adapter and its fixtures first.
 
-[`context.ps1`](context.ps1:1) provides a single source of truth for all Scoop paths:
+## Safety invariants
 
-| Variable | Description |
-|----------|-------------|
-| `$Script:ScoopHome` | User's Scoop directory (from `$env:SCOOP` or `~/scoop`) |
-| `$Script:ScoopGlobal` | Global Scoop directory (from `$env:SCOOP_GLOBAL` or `C:\ProgramData\scoop`) |
-| `$Script:ScoopPaths` | Ordered hashtable of Scoop subdirectories (apps, buckets, persist, shims, cache, spx) |
+- User-controlled names are one contained segment; traversal and separator forms are rejected.
+- `current` and relocated targets must remain inside their admitted owners.
+- Destination storage cannot overlap Scoop apps, persist roots, or SPX state.
+- Unowned existing paths are collisions, not merge targets.
+- Every mutation re-admits state under a bounded lock before its first effect.
+- Durable evidence precedes non-atomic external effects; config commit follows verification.
+- Cleanup removes only operation-owned paths whose identity/content is still proven.
+- Repair refuses ambiguity and retains evidence.
+- Each batch identity is an independent transaction; there is no implied aggregate rollback.
 
----
+See [how SPX works](how-it-works.md) for operator-level transaction sequences.
 
-## Library
+## Compatibility and quality
 
-### [`lib/Core.ps1`](lib/Core.ps1:1) - Shared Utilities
+The supported runtimes are Windows PowerShell 5.1 and PowerShell 7. `tools/Invoke-Quality.ps1` owns
+parse, manifest, CLI/API parity, help, documentation-link, analyzer, and formatter checks.
+`tools/Invoke-Tests.ps1` owns the controlled Pester suite plus direct packaged-entry smoke. CI only
+installs pinned tools and invokes these repository commands.
 
-Pure functions only. No Write-Host. Outputs objects, not strings.
+Tests use isolated Scoop roots and local Git repositories. Release authority is a separate job with
+job-scoped write permission and depends on unprivileged verification of the tagged checkout.
 
-| Function | Description |
-|----------|-------------|
-| `ConvertFrom-JsonAsHashtable` | JSON to hashtable (PS5.1+ compatible) |
-| `Test-IsAdmin` | Check if running as Administrator |
-| `Get-AppBasePath` | Get app base directory |
-| `Test-AppInstalled` | Check if app is installed |
-| `Get-AppVersions` | Get all installed versions |
-| `Get-AppCurrentVersion` | Get current (active) version |
-| `Get-AppInstallManifest` | Read install.json |
-| `Get-AppPersistPath` | Get persist directory path |
-| `Resolve-VersionSymlink` | Resolve symlink target |
-| `Invoke-RobocopyMove` | Move files via robocopy |
-| `New-Symlink` | Create symbolic link |
-| `Update-PersistLinks` | Sync persist directory symlinks |
+## Cost model
 
-### [`lib/Config.ps1`](lib/Config.ps1:1) - Configuration I/O
+Layout traversal is iterative, skips reparse points and excluded persisted subtrees, and hashes
+files as streams. Source inventory parses context/config once per invocation and uses a current-only
+fast path. The deterministic 120-app test retains a 15-second and 128 MiB managed-allocation guard;
+the 1,000-app benchmark is diagnostic because storage/security scanning makes wall time noisy.
 
-Thin read/write layer. No business logic.
+Help and version must finish before module import or Scoop-state access. CLI admission is linear in
+the small declared parameter set and keeps no process-global cache. A speed claim requires fresh
+runtime/host workload, repetitions, median/p95 or allocation, variance, and semantic equivalence.
 
-| Config File | Location |
-|-------------|----------|
-| spx.json | `$env:SCOOP/spx/spx.json` |
-| links.json | `$env:SCOOP/spx/links.json` |
-
-| Function | Description |
-|----------|-------------|
-| `Get-SpxConfig` | Read from spx.json |
-| `Set-SpxConfig` | Write to spx.json |
-| `Get-LinksConfig` | Read links.json |
-| `Set-LinksConfig` | Write links.json |
-| `Get-LinkEntry` | Get single link entry |
-| `Set-LinkEntry` | Create/update link entry |
-| `Remove-LinkEntry` | Remove link entry |
-| `Export-LinksConfig` | Export to file |
-| `Import-LinksConfig` | Import from file |
-
-### [`lib/Parse.ps1`](lib/Parse.ps1:1) - Argument Parsing
-
-| Function | Description |
-|----------|-------------|
-| `Get-ParsedArgs` | Parse flat argument array into positional items and named options |
-| `Test-HelpFlag` | Check for -h/--help flags |
-
----
-
-## Modules
-
-### LINK - App Relocation
-
-Located in [`modules/Link.ps1`](modules/Link.ps1:1). Moves apps to custom paths via symbolic links.
-
-| Command | Description |
-|---------|-------------|
-| `spx link <app> --path <dir>` | Move app to custom directory |
-| `spx link --export <file>` | Export links.json to file |
-| `spx link --import <file> [--merge]` | Import links.json from file |
-| `spx unlink <app>` | Restore app to Scoop directory |
-| `spx linked [--status]` | List linked apps |
-| `spx sync [<app>]` | Sync version/persist state |
-| `spx cleanup [--dry-run] [--force]` | Remove stale link entries |
-
-| Function | Description |
-|----------|-------------|
-| `New-AppLink` | Move app to custom path, leave symlink |
-| `Remove-AppLink` | Restore app to Scoop, remove symlink |
-| `Get-AppLinkStatus` | Get link status (Linked/Stale) |
-| `Sync-AppLinks` | Reconcile config with installed state |
-| `Get-StaleLinkEntries` | Find entries with missing app dirs |
-| `Remove-StaleLinkEntry` | Remove single stale entry |
-
----
-
-### SOURCE - Bucket Source Management
-
-Located in [`modules/Source.ps1`](modules/Source.ps1:1). **Stateless** - reads directly from Scoop's install.json.
-
-| Command | Description |
-|---------|-------------|
-| `spx source list` | List all apps with bucket sources |
-| `spx source show <app>` | Show app source details |
-| `spx source change <app> <bucket>` | Change app's bucket |
-| `spx source verify [<app>]` | Verify manifest matches bucket |
-| `spx source diff <app> <bucket>` | Compare installed vs bucket manifest |
-| `spx source find <app>` | Search all buckets for app |
-
-| Function | Description |
-|----------|-------------|
-| `Get-AppSource` | Get source info for an app |
-| `Get-AppSourceList` | List all apps with sources |
-| `Move-AppSource` | Change app's bucket |
-| `Test-AppSourceValid` | Verify app matches bucket |
-| `Compare-AppManifest` | Compare installed vs bucket |
-| `Find-AppBucket` | Search buckets for app |
-| `Get-BucketList` | List added buckets |
-
----
-
-### MIRROR - Bucket Mirror Management
-
-Located in [`modules/Mirror.ps1`](modules/Mirror.ps1:1). Manages bucket git remote mirrors, preserving original URLs for reversibility.
-
-| Command | Description |
-|---------|-------------|
-| `spx mirror list` | List buckets and mirror state |
-| `spx mirror show <bucket>` | Show bucket mirror details |
-| `spx mirror add <bucket> <url>` | Add mirror (fails if exists) |
-| `spx mirror set <bucket> <url>` | Set/change mirror URL |
-| `spx mirror remove <bucket>` | Restore original URL |
-
-| Function | Description |
-|----------|-------------|
-| `Get-BucketMirror` | Get mirror info for bucket(s) |
-| `Set-BucketMirror` | Set bucket remote to mirror URL |
-| `Remove-BucketMirror` | Restore original remote URL |
-| `Get-BucketRemoteUrl` | Get current git remote URL |
-| `Set-BucketRemoteUrl` | Set git remote URL |
-
----
-
-## Sandbox - Test Helper
-
-Located in [`tests/Sandbox.ps1`](tests/Sandbox.ps1:1). Provides isolated test environment for Pester tests.
-
-### Functions
-
-| Function | Description |
-|----------|-------------|
-| `Enter-Sandbox` | Enter sandbox, inject test paths |
-| `Exit-Sandbox` | Exit sandbox, restore original environment |
-| `New-SandboxApp` | Create fake app with install.json |
-| `New-SandboxBucketDir` | Create fake bucket directory |
-| `New-SandboxBucketManifest` | Create bucket manifest file |
-| `Write-SandboxLinkEntry` | Write link entry for testing |
-
-### Environment Injection
-
-| Variable | Original | Sandbox |
-|----------|----------|---------|
-| `$env:SCOOP` | User's scoop path | `TestDrive:\sandbox\scoop` |
-| `$env:SCOOP_GLOBAL` | User's global scoop path | `TestDrive:\sandbox\scoop_global` |
-
----
-
-## CLI
-
-```
-spx <command> [options]
-
-Commands:
-  link     <app> --path <dir>   Relocate app to a custom directory
-  unlink   <app>                Restore app to Scoop directory
-  linked   [--status]           List linked apps
-  sync     [<app>]              Sync version/persist state for linked apps
-  cleanup  [--dry-run]          Remove stale link entries
-  source   <action> [...]       Manage app bucket sources
-  mirror   <action> [...]       Manage bucket git remote mirrors
-
-Flags (any command):
-  --global, -g    Operate on the global Scoop install
-  --whatif        Simulate without making changes
-  -d, --debug     Verbose debug output
-  -h, --help      Show help
-```
-
----
-
-## Function Naming
-
-| Verb | Purpose |
-|------|---------|
-| `Get-` | Retrieve data |
-| `Set-` | Modify config |
-| `New-` | Create resource |
-| `Remove-` | Delete resource |
-| `Test-` | Validate |
-| `Invoke-` | Execute operation |
-| `Sync-` | Reconcile state |
-| `Move-` | Change location |
-| `Compare-` | Compare two sources |
-
----
-
-## Error Handling
-
-| Category | Behavior |
-|----------|----------|
-| Context | Terminate immediately |
-| Validation | Return error, no action |
-| Maybe | Return `$null` |
-| Recoverable | Try/catch with rollback |
-
----
-
-## Testing
-
-Tests use [Pester](https://pester.dev/) and the Sandbox helper:
-
-```powershell
-# tests/Link.Tests.ps1
-
-BeforeAll {
-    . "$PSScriptRoot/Sandbox.ps1"
-    . "$PSScriptRoot/../lib/Core.ps1"
-    . "$PSScriptRoot/../modules/Link.ps1"
-}
-
-Describe "New-AppLink" {
-    BeforeEach {
-        $sb = Enter-Sandbox
-        New-SandboxApp -AppName 'jq' -Version '1.7.1'
-    }
-    
-    AfterEach {
-        Exit-Sandbox
-    }
-    
-    It "Moves app to custom path" {
-        $result = New-AppLink -AppName 'jq' -Path 'D:\Apps' -Confirm:$false
-        $result.AppName | Should -Be 'jq'
-    }
-}
-```
+Reopen architecture only if the Scoop shim cannot invoke the advanced script, a command cannot map
+to one module operation without semantic loss, the Scoop layout adapter cannot express a supported
+layout, or a new output consumer requires a separately versioned serialization contract.
