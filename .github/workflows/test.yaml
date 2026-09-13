@@ -35,15 +35,25 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shell: [powershell, pwsh]
+        runtime: [powershell, pwsh]
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install pinned Pester
-        shell: ${{ matrix.shell }}
+      - name: Install pinned Pester in Windows PowerShell
+        if: matrix.runtime == 'powershell'
+        shell: powershell
         run: Install-Module Pester -RequiredVersion 5.7.1 -Force -SkipPublisherCheck -Scope CurrentUser
-      - name: Run canonical tests and packaged CLI smoke
-        shell: ${{ matrix.shell }}
+      - name: Run Windows PowerShell tests and packaged CLI smoke
+        if: matrix.runtime == 'powershell'
+        shell: powershell
+        run: ./tools/Invoke-Tests.ps1
+      - name: Install pinned Pester in PowerShell 7
+        if: matrix.runtime == 'pwsh'
+        shell: pwsh
+        run: Install-Module Pester -RequiredVersion 5.7.1 -Force -SkipPublisherCheck -Scope CurrentUser
+      - name: Run PowerShell 7 tests and packaged CLI smoke
+        if: matrix.runtime == 'pwsh'
+        shell: pwsh
         run: ./tools/Invoke-Tests.ps1
