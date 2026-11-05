@@ -1,53 +1,4 @@
-# lib/Core.ps1 - shared, non-exported primitives (PowerShell 5.1+)
-
-. "$PSScriptRoot/Context.ps1"
-
-function ConvertTo-SpxHashtable {
-    param ([AllowNull()]$InputObject)
-    if ($null -eq $InputObject) { return $null }
-    if ($InputObject -is [Collections.IDictionary]) {
-        $result = [ordered]@{}
-        foreach ($key in $InputObject.Keys) { $result[[string]$key] = ConvertTo-SpxHashtable $InputObject[$key] }
-        return $result
-    }
-    if ($InputObject -is [Collections.IEnumerable] -and $InputObject -isnot [string]) {
-        return @($InputObject | ForEach-Object { ConvertTo-SpxHashtable $_ })
-    }
-    if ($InputObject -is [Management.Automation.PSCustomObject]) {
-        $result = [ordered]@{}
-        foreach ($property in $InputObject.PSObject.Properties) { $result[$property.Name] = ConvertTo-SpxHashtable $property.Value }
-        return $result
-    }
-    $InputObject
-}
-
-function ConvertFrom-JsonAsHashtable {
-    [CmdletBinding()]
-    param ([Parameter(Mandatory, ValueFromPipeline)] [AllowEmptyString()] [string]$Json)
-    process {
-        if ([string]::IsNullOrWhiteSpace($Json)) { throw [IO.InvalidDataException]::new('JSON content is empty.') }
-        try {
-            if ($PSVersionTable.PSVersion.Major -ge 7) {
-                return (ConvertFrom-Json -InputObject $Json -AsHashtable -Depth 30 -ErrorAction Stop)
-            }
-            ConvertTo-SpxHashtable (ConvertFrom-Json -InputObject $Json -ErrorAction Stop)
-        }
-        catch { throw [IO.InvalidDataException]::new(('Invalid JSON: ' + $_.Exception.Message), $_.Exception) }
-    }
-}
-
-function Add-SpxTypeName {
-    param ([Parameter(Mandatory)]$InputObject, [Parameter(Mandatory)][string]$TypeName)
-    $InputObject.PSObject.TypeNames.Insert(0, $TypeName)
-    $InputObject
-}
-
-function Stop-SpxError {
-    param ([Parameter(Mandatory)][string]$Id, [Parameter(Mandatory)][string]$Message, [object]$TargetObject)
-    $exception = New-Object InvalidOperationException($Message)
-    $record = New-Object Management.Automation.ErrorRecord($exception, $Id, [Management.Automation.ErrorCategory]::InvalidOperation, $TargetObject)
-    throw $record
-}
+# Checked filesystem operations and contained paths.
 
 function Assert-SpxName {
     param ([Parameter(Mandatory)][string]$Name, [string]$Kind = 'name')
@@ -65,6 +16,11 @@ function Assert-SpxRelativePath {
     if (-not(Test-SpxPathWithin $combined $root) -or $combined.Equals($root, [StringComparison]::OrdinalIgnoreCase)) {
         throw [ArgumentException]::new("Invalid SPX $Kind '$Path'.")
     }
+}
+
+function Test-SpxAbsolutePath {
+    param ([string]$Path)
+    $Path -and [IO.Path]::IsPathRooted($Path) -and [IO.Path]::GetPathRoot($Path).Length -ge 3
 }
 
 function Test-SpxPathWithin {
@@ -99,24 +55,6 @@ function New-SpxDirectoryJunction {
     if (-not $observed -or -not $observed.Equals([IO.Path]::GetFullPath($Target), [StringComparison]::OrdinalIgnoreCase)) {
         throw "Junction verification failed for '$Path'."
     }
-}
-
-function Remove-SpxOwnedTree {
-    param ([Parameter(Mandatory)][string]$Path)
-    if (-not (Test-Path -LiteralPath $Path)) { return }
-    $item = Get-Item -LiteralPath $Path -Force
-    if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
-        if ($item.PSIsContainer) { [IO.Directory]::Delete($item.FullName, $false) }
-        else { [IO.File]::Delete($item.FullName) }
-        return
-    }
-    if (-not $item.PSIsContainer) {
-        if ($item.IsReadOnly) { $item.IsReadOnly = $false }
-        [IO.File]::Delete($item.FullName)
-        return
-    }
-    foreach ($child in @(Get-ChildItem -LiteralPath $item.FullName -Force)) { Remove-SpxOwnedTree $child.FullName }
-    [IO.Directory]::Delete($item.FullName, $false)
 }
 
 function Get-SpxTreeEntries {
@@ -171,7 +109,7 @@ function Copy-SpxTree {
         $parent = Split-Path -Parent $link.Target
         if (-not(Test-Path -LiteralPath $parent)) { $null = New-Item -ItemType Directory -Path $parent -Force }
         if ($link.Source.LinkType -eq 'Junction') { New-SpxDirectoryJunction -Path $link.Target -Target $link.TargetPath }
-        else { $null = New-Item -ItemType SymbolicLink -Path $link.Target -Target $link.TargetPath -ErrorAction Stop }
+        else { New-SpxSymbolicLink -Path $link.Target -Target $link.TargetPath -Directory:$link.Source.PSIsContainer }
     }
     foreach ($directory in @($directories | Sort-Object { $_.Target.Length } -Descending)) {
         [IO.Directory]::SetCreationTimeUtc($directory.Target, $directory.Source.CreationTimeUtc)
@@ -186,17 +124,17 @@ function Copy-SpxTree {
 }
 
 function Update-SpxMovedInternalLinks {
-    param ([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)][string]$PreviousRoot)
-    foreach ($item in @(Get-SpxTreeEntries -Root $Root | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint })) {
+    param ([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)][string]$PreviousRoot, [string[]]$ExcludeRelative = @())
+    foreach ($item in @(Get-SpxTreeEntries -Root $Root -ExcludeRelative $ExcludeRelative | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint })) {
         $oldTarget = Get-SpxLinkTarget $item.FullName
         if (Test-SpxPathWithin $oldTarget $Root) { continue }
         if (-not(Test-SpxPathWithin $oldTarget $PreviousRoot)) { throw "Moved reparse target is outside the admitted tree: $($item.FullName)" }
         $relative = $oldTarget.Substring([IO.Path]::GetFullPath($PreviousRoot).TrimEnd('\').Length).TrimStart('\')
         $newTarget = Join-Path $Root $relative
         $linkType = $item.LinkType; $linkPath = $item.FullName
-        Remove-SpxOwnedTree $linkPath
+        if ($item.PSIsContainer) { [IO.Directory]::Delete($linkPath, $false) } else { [IO.File]::Delete($linkPath) }
         if ($linkType -eq 'Junction') { New-SpxDirectoryJunction -Path $linkPath -Target $newTarget }
-        else { $null = New-Item -ItemType SymbolicLink -Path $linkPath -Target $newTarget -ErrorAction Stop }
+        else { New-SpxSymbolicLink -Path $linkPath -Target $newTarget -Directory:$item.PSIsContainer }
     }
 }
 
@@ -241,4 +179,90 @@ function Test-SpxContentEquivalent {
     if ([bool]$leftItem.PSIsContainer -ne [bool]$rightItem.PSIsContainer) { return $false }
     if ($leftItem.PSIsContainer) { return (Get-SpxTreeFingerprint $Left) -eq (Get-SpxTreeFingerprint $Right) }
     (Get-SpxFileFingerprint $Left) -eq (Get-SpxFileFingerprint $Right)
+}
+
+function Move-SpxTree {
+    param ([string]$Source, [string]$Destination, [string[]]$ExcludeRelative = @())
+    [IO.Directory]::Move($Source, $Destination)
+    Update-SpxMovedInternalLinks -Root $Destination -PreviousRoot $Source -ExcludeRelative $ExcludeRelative
+}
+
+function New-SpxSymbolicLink {
+    param ([string]$Path, [string]$Target, [switch]$Directory)
+    if (-not ('SPX.NativeLinks' -as [type])) {
+        Add-Type -ErrorAction Stop -TypeDefinition @'
+using System.Runtime.InteropServices;
+namespace SPX {
+    public static class NativeLinks {
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.U1)]
+        public static extern bool CreateSymbolicLinkW(string path, string target, uint flags);
+    }
+}
+'@
+    }
+    $flags = if ($Directory) { 1 } else { 0 }
+    $created = [SPX.NativeLinks]::CreateSymbolicLinkW($Path, $Target, ($flags -bor 2))
+    if (-not $created -and [Runtime.InteropServices.Marshal]::GetLastWin32Error() -eq 87) {
+        $created = [SPX.NativeLinks]::CreateSymbolicLinkW($Path, $Target, $flags)
+    }
+    if (-not $created) {
+        $failure = New-Object ComponentModel.Win32Exception([Runtime.InteropServices.Marshal]::GetLastWin32Error())
+        Stop-SpxError 'Spx.SymbolicLinkFailed' ("Could not create '$Path': " + $failure.Message) $Path
+    }
+}
+
+function Assert-SpxPlainPath {
+    param ([string]$Path)
+    $ancestor = [IO.Path]::GetFullPath($Path)
+    while ($ancestor) {
+        $item = Get-Item -LiteralPath $ancestor -Force -ErrorAction SilentlyContinue
+        if ($item -and ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw "Reparse point in copy path: $ancestor" }
+        $ancestor = [IO.Path]::GetDirectoryName($ancestor)
+    }
+}
+
+function Assert-SpxReclaimStreams {
+    param ([string]$Path)
+    # Windows PowerShell's provider omits directory streams. Use the same native query on both runtimes.
+    if (-not ('SPX.NativeStreams' -as [type])) {
+        Add-Type -ErrorAction Stop -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+namespace SPX {
+    public static class NativeStreams {
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct StreamData {
+            public long Size;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 296)] public string Name;
+        }
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern IntPtr FindFirstStreamW(string path, int level, out StreamData data, uint flags);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool FindNextStreamW(IntPtr handle, out StreamData data);
+        [DllImport("kernel32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool FindClose(IntPtr handle);
+        public static bool HasNamed(string path) {
+            StreamData data;
+            IntPtr handle = FindFirstStreamW(path, 0, out data, 0);
+            if (handle == new IntPtr(-1)) {
+                int error = Marshal.GetLastWin32Error();
+                if (error == 38) return false;
+                throw new Win32Exception(error);
+            }
+            try {
+                do { if (data.Name != "::$DATA") return true; } while (FindNextStreamW(handle, out data));
+                int error = Marshal.GetLastWin32Error();
+                if (error != 38) throw new Win32Exception(error);
+                return false;
+            } finally { FindClose(handle); }
+        }
+    }
+}
+'@
+    }
+    if ([SPX.NativeStreams]::HasNamed($Path)) { throw "Named data streams require manual inspection: $Path" }
 }

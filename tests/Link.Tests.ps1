@@ -5,6 +5,18 @@ Describe 'SPX recoverable app relocation' {
     BeforeEach { $sb = Enter-SpxTestSandbox -Root (Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))); $destination = Join-Path $sb.Root 'relocated' }
     AfterEach { Exit-SpxTestSandbox }
 
+    It 'preserves the absolute form of an admitted drive root' {
+        & (Get-Module SPX) { Resolve-SpxDestination 'Z:\' } | Should -BeExactly 'Z:\'
+    }
+
+    It 'treats absent optional persist paths as consistent across relocation and restore' {
+        New-SpxTestApp optional -Version 1 -Persist @('not-created') | Out-Null
+        Move-SpxApp optional $destination -Confirm:$false | Out-Null
+        (Get-SpxLinkedApp optional).State | Should -Be Healthy
+        Restore-SpxApp optional -Confirm:$false | Out-Null
+        (Get-SpxStatus optional -Scope Local).Issues.Code | Should -Not -Contain PersistDrift
+    }
+
     It 'moves through a verified copy, leaves a junction, and restores bytes' {
         $app = New-SpxTestApp -Name rg -Version 14
         $move = Move-SpxApp rg $destination -Confirm:$false
@@ -90,8 +102,9 @@ Describe 'SPX recoverable app relocation' {
         $repair = Repair-SpxLinkedApp crash -Confirm:$false
         $repair.Status | Should -Be RolledBack
         Test-Path $app.VersionPath | Should -BeTrue
-        Test-Path $target | Should -BeFalse
-        Test-Path $stage | Should -BeFalse
+        Test-Path $target | Should -BeTrue
+        Test-Path $stage | Should -BeTrue
+        (Get-SpxLinkedApp crash -Scope Local).RetainedCopies.Count | Should -Be 2
         Test-Path (Join-Path $opDir 'local-crash.json') | Should -BeFalse
     }
 

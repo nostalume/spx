@@ -1,4 +1,4 @@
-#Requires -Module Pester
+﻿#Requires -Module Pester
 
 Describe 'SPX native module contract' {
     BeforeAll {
@@ -6,10 +6,10 @@ Describe 'SPX native module contract' {
         $manifest = Join-Path $PSScriptRoot '..\SPX.psd1'
         Import-Module $manifest -Force
         $expectedExports = @(
-            'Move-SpxApp', 'Restore-SpxApp', 'Get-SpxLinkedApp', 'Sync-SpxLinkedApp', 'Repair-SpxLinkedApp', 'Remove-SpxStaleLink',
+            'Move-SpxApp', 'Restore-SpxApp', 'Get-SpxLinkedApp', 'Sync-SpxLinkedApp', 'Repair-SpxLinkedApp', 'Remove-SpxStaleLink', 'Remove-SpxRetainedCopy',
             'Export-SpxLinkConfiguration', 'Import-SpxLinkConfiguration', 'Get-SpxAppSource', 'Set-SpxAppSource', 'Test-SpxAppSource',
             'Compare-SpxAppSource', 'Find-SpxAppSource', 'Get-SpxBucketMirror', 'New-SpxBucketMirror', 'Set-SpxBucketMirror',
-            'Remove-SpxBucketMirror', 'Repair-SpxBucketMirror'
+            'Remove-SpxBucketMirror', 'Repair-SpxBucketMirror', 'Get-SpxStatus'
         ) | Sort-Object
     }
     It 'exports exactly the approved commands' {
@@ -36,9 +36,9 @@ Describe 'SPX native module contract' {
     }
 
     It 'gives mutations ShouldProcess and keeps reads read-only' {
-        $mutations = @('Move-SpxApp', 'Restore-SpxApp', 'Sync-SpxLinkedApp', 'Repair-SpxLinkedApp', 'Remove-SpxStaleLink', 'Export-SpxLinkConfiguration', 'Import-SpxLinkConfiguration', 'Set-SpxAppSource', 'New-SpxBucketMirror', 'Set-SpxBucketMirror', 'Remove-SpxBucketMirror', 'Repair-SpxBucketMirror')
+        $mutations = @('Move-SpxApp', 'Restore-SpxApp', 'Sync-SpxLinkedApp', 'Repair-SpxLinkedApp', 'Remove-SpxStaleLink', 'Remove-SpxRetainedCopy', 'Export-SpxLinkConfiguration', 'Import-SpxLinkConfiguration', 'Set-SpxAppSource', 'New-SpxBucketMirror', 'Set-SpxBucketMirror', 'Remove-SpxBucketMirror', 'Repair-SpxBucketMirror')
         foreach ($name in $mutations) { (Get-Command $name).Parameters.ContainsKey('WhatIf') | Should -BeTrue }
-        foreach ($name in @('Get-SpxLinkedApp', 'Get-SpxAppSource', 'Test-SpxAppSource', 'Compare-SpxAppSource', 'Find-SpxAppSource', 'Get-SpxBucketMirror')) { (Get-Command $name).Parameters.ContainsKey('WhatIf') | Should -BeFalse }
+        foreach ($name in @('Get-SpxLinkedApp', 'Get-SpxAppSource', 'Test-SpxAppSource', 'Compare-SpxAppSource', 'Find-SpxAppSource', 'Get-SpxBucketMirror', 'Get-SpxStatus')) { (Get-Command $name).Parameters.ContainsKey('WhatIf') | Should -BeFalse }
     }
 
     It 'binds object properties from the pipeline' {

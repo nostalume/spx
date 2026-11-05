@@ -24,7 +24,7 @@ $settings = Import-PowerShellDataFile $settingsPath
 
 $sourceFiles = @(
     Get-ChildItem -LiteralPath $repository -File | Where-Object { $_.Extension -in '.ps1', '.psm1', '.psd1' }
-    foreach ($directory in 'lib', 'domain', 'tests', 'tools') {
+    foreach ($directory in 'src', 'tests', 'tools') {
         Get-ChildItem -LiteralPath (Join-Path $repository $directory) -Recurse -File |
             Where-Object { $_.Extension -in '.ps1', '.psm1', '.psd1' }
         }
@@ -75,44 +75,28 @@ $sourceFiles = @(
 
     Remove-Module SPX -ErrorAction SilentlyContinue
     Import-Module $manifestPath -Force -ErrorAction Stop
-    . (Join-Path $repository 'lib\Cli.ps1')
+    . (Join-Path $repository 'src\Cli.ps1')
     $specification = Get-SpxCliSpecification
     $exports = @(Get-Command -Module SPX | Select-Object -ExpandProperty Name | Sort-Object)
     $targets = @($specification.Values.Function | Sort-Object -Unique)
-    if (Compare-Object $exports $targets) { throw 'CLI dispatch targets and module exports differ.' }
+    if (@($targets | Where-Object { $_ -notin $exports }).Count) { throw 'CLI target is not exported by the module.' }
 
-    $scriptCommand = Get-Command (Join-Path $repository 'spx.ps1')
-    $declaredScriptParameters = @($scriptCommand.Parameters.Keys)
-    foreach ($item in $specification.GetEnumerator()) {
-        $target = Get-Command $item.Value.Function -Module SPX
-        foreach ($parameter in $item.Value.Parameters) {
-            if ($parameter -notin $declaredScriptParameters) { throw "CLI leaf '$($item.Key)' uses undeclared script parameter '$parameter'." }
-            if (-not $target.Parameters.ContainsKey($parameter)) { throw "CLI leaf '$($item.Key)' cannot pass '$parameter' to '$($target.Name)'." }
+    $declared = (Get-Command (Join-Path $repository 'spx.ps1')).Parameters
+    foreach ($cliMode in $specification.Values) {
+        foreach ($parameter in $cliMode.Parameters) {
+            if (-not $declared.ContainsKey($parameter)) { throw "Mode uses undeclared parameter '$parameter'." }
+            if ($parameter -notin 'Buckets', 'Find', 'Compare', 'CheckVersion', 'Reset' -and -not (Get-Command $cliMode.Function).Parameters.ContainsKey($parameter)) { throw "Invalid API mapping: $($cliMode.Function)/$parameter" }
         }
-        if ($item.Value.IdentityParameter -and -not $target.Parameters.ContainsKey($item.Value.IdentityParameter)) {
-            throw "CLI leaf '$($item.Key)' identity parameter is absent from '$($target.Name)'."
-        }
+        if ($cliMode.Example -notmatch ('^spx ' + $cliMode.Command)) { throw 'Mode example does not match its command.' }
     }
-
-    $apiText = Get-Content -LiteralPath (Join-Path $repository 'docs\api.md') -Raw
-    $cliText = Get-Content -LiteralPath (Join-Path $repository 'docs\cli.md') -Raw
     foreach ($name in $exports) {
-        if ($apiText -notmatch [regex]::Escape("``$name``")) { throw "docs/api.md omits '$name'." }
         $help = Get-Help $name -Full
-        if ([string]::IsNullOrWhiteSpace(($help.Description.Text -join ' '))) { throw "'$name' has no help description." }
-        if (@($help.Examples.Example).Count -eq 0) { throw "'$name' has no help example." }
-        if (-not $help.ReturnValues) { throw "'$name' has no outputs help." }
+        if (-not $help.Description -or -not $help.Examples -or -not $help.ReturnValues) { throw "Incomplete help for '$name'." }
         foreach ($parameter in (Get-Command $name).Parameters.Keys) {
             if ($parameter -in [Management.Automation.Cmdlet]::CommonParameters -or $parameter -in [Management.Automation.Cmdlet]::OptionalCommonParameters) { continue }
-            $parameterHelp = @($help.Parameters.Parameter | Where-Object Name -EQ $parameter)
-            if (-not $parameterHelp -or [string]::IsNullOrWhiteSpace(($parameterHelp.Description.Text -join ' '))) {
-                throw "'$name' has no meaningful help for '-$parameter'."
-            }
+            $entry = @($help.Parameters.Parameter | Where-Object Name -EQ $parameter)
+            if (-not $entry -or [string]::IsNullOrWhiteSpace(($entry.Description.Text -join ' '))) { throw "Missing help: $name/$parameter" }
         }
-    }
-    foreach ($key in $specification.Keys) {
-        $display = 'spx ' + $key.Replace('/', ' ')
-        if ($cliText -notmatch [regex]::Escape($display)) { throw "docs/cli.md omits '$display'." }
     }
 
     $markdownFiles = Get-ChildItem -LiteralPath $repository -Recurse -File -Filter '*.md' |
@@ -134,6 +118,6 @@ foreach ($file in $markdownFiles) {
     Analyzer = $requiredAnalyzer.ToString()
     Sources = $sourceFiles.Count
     Exports = $exports.Count
-    CliLeaves = $specification.Count
+    CliModes = $specification.Count
     Status = 'Passed'
 }

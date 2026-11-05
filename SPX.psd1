@@ -1,4 +1,4 @@
-@{
+﻿@{
     RootModule = 'SPX.psm1'
     ModuleVersion = '0.5.0'
     GUID = 'cb81d0f7-9688-4f35-a387-2bdd7e252f2f'
@@ -9,10 +9,10 @@
     PowerShellVersion = '5.1'
     CompatiblePSEditions = @('Desktop', 'Core')
     FunctionsToExport = @(
-        'Move-SpxApp', 'Restore-SpxApp', 'Get-SpxLinkedApp', 'Sync-SpxLinkedApp', 'Repair-SpxLinkedApp', 'Remove-SpxStaleLink',
+        'Move-SpxApp', 'Restore-SpxApp', 'Get-SpxLinkedApp', 'Sync-SpxLinkedApp', 'Repair-SpxLinkedApp', 'Remove-SpxStaleLink', 'Remove-SpxRetainedCopy',
         'Export-SpxLinkConfiguration', 'Import-SpxLinkConfiguration', 'Get-SpxAppSource', 'Set-SpxAppSource', 'Test-SpxAppSource',
         'Compare-SpxAppSource', 'Find-SpxAppSource', 'Get-SpxBucketMirror', 'New-SpxBucketMirror', 'Set-SpxBucketMirror',
-        'Remove-SpxBucketMirror', 'Repair-SpxBucketMirror'
+        'Remove-SpxBucketMirror', 'Repair-SpxBucketMirror', 'Get-SpxStatus'
     )
     CmdletsToExport = @()
     VariablesToExport = @()

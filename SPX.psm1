@@ -1,70 +1,130 @@
-# SPX module root - import is deliberately effect-neutral.
+# SPX module: one composition root, no import-time filesystem effects.
 
-. "$PSScriptRoot/lib/Context.ps1"
-. "$PSScriptRoot/lib/Core.ps1"
-. "$PSScriptRoot/lib/Config.ps1"
-. "$PSScriptRoot/lib/ScoopState.ps1"
-. "$PSScriptRoot/domain/Link.ps1"
-. "$PSScriptRoot/domain/Source.ps1"
-. "$PSScriptRoot/domain/Mirror.ps1"
+function Add-SpxTypeName {
+    param ([Parameter(Mandatory)]$InputObject, [Parameter(Mandatory)][string]$TypeName)
+    $InputObject.PSObject.TypeNames.Insert(0, $TypeName)
+    $InputObject
+}
 
-function Export-SpxLinkConfiguration {
+function Stop-SpxError {
+    param ([Parameter(Mandatory)][string]$Id, [Parameter(Mandatory)][string]$Message, [object]$TargetObject)
+    $exception = New-Object InvalidOperationException($Message)
+    $record = New-Object Management.Automation.ErrorRecord($exception, $Id, [Management.Automation.ErrorCategory]::InvalidOperation, $TargetObject)
+    throw $record
+}
+
+foreach ($owner in 'Files', 'Store', 'Scoop', 'Link', 'Source') { . "$PSScriptRoot/src/$owner.ps1" }
+
+function Get-SpxStatus {
     <#
     .SYNOPSIS
-    Atomically exports the complete SPX link configuration.
+    Observes app placement, recovery evidence, retained copies, and source relationships.
     .DESCRIPTION
-    Validates current link configuration and writes it through a same-directory atomic replacement.
-    .PARAMETER Path
-    Destination file path.
-    .PARAMETER Force
-    Allows replacement when the destination already exists.
+    Returns structured per-target observations without creating state or following unowned paths.
+    One invalid app or bucket does not hide the remaining targets. No observation grants mutation authority.
+    .PARAMETER Name
+    Optional app names. Omission inventories installed apps, recorded intent, operations and retained copies.
+    .PARAMETER Scope
+    Local, Global or All; defaults to All. Applies to app targets only.
+    .PARAMETER Bucket
+    Explicit bucket names instead of app targets.
+    .PARAMETER Buckets
+    Inventories bucket directories, committed mirror records and pending bucket operations.
     .OUTPUTS
-    SPX.LinkConfigurationExportResult.
+    SPX.Status objects with Status, Placement, Issues, Source, PendingOperation and RetainedCopies.
     .EXAMPLE
-    Export-SpxLinkConfiguration -Path '.\spx-links.json' -Force -WhatIf
+    Get-SpxStatus jq -Scope Local
+    .EXAMPLE
+    Get-SpxStatus -Bucket main
     #>
-    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium')]
-    param ([Parameter(Mandatory)][string]$Path, [switch]$Force)
-    $fullPath = [IO.Path]::GetFullPath($Path)
-    if ((Test-Path -LiteralPath $fullPath) -and -not $Force) { Stop-SpxError 'Spx.ExportExists' "Export path already exists: $fullPath" $fullPath }
-    if ($PSCmdlet.ShouldProcess($fullPath, 'export SPX link configuration')) {
-        Export-LinksConfig -Path $fullPath
-        Add-SpxTypeName ([pscustomobject]@{ Path = $fullPath; Status = 'Exported'; Changed = $true }) 'SPX.LinkConfigurationExportResult'
+    [CmdletBinding(DefaultParameterSetName = 'App')]
+    param (
+        [Parameter(Position = 0, ParameterSetName = 'App', ValueFromPipeline, ValueFromPipelineByPropertyName)][Alias('AppName')][string[]]$Name,
+        [Parameter(ParameterSetName = 'App')][ValidateSet('Local', 'Global', 'All')][string]$Scope = 'All',
+        [Parameter(Mandatory, ParameterSetName = 'Bucket')][string[]]$Bucket,
+        [Parameter(Mandatory, ParameterSetName = 'Buckets')][switch]$Buckets
+    )
+    process {
+        if ($PSCmdlet.ParameterSetName -ne 'App') {
+            $names = @($Bucket)
+            if ($Buckets) {
+                try { $names = @(Get-SpxSourceNames) }
+                catch {
+                    Add-SpxTypeName ([pscustomobject]@{ TargetKind = 'Bucket'; Name = '*'; Scope = $null; Status = 'Invalid'; Placement = $null; Issues = @([pscustomobject]@{ Code = 'InvalidState'; Message = $_.Exception.Message }); Source = $null; PendingOperation = $null; RetainedCopies = @(); NextActions = @('Inspect') }) 'SPX.Status'
+                    return
+                }
+
+            }
+            foreach ($target in @($names | Select-Object -Unique)) {
+                Assert-SpxName $target 'bucket'
+                $issues = @(); $view = $null; $pending = $null
+                try { $pending = Read-SpxOperation mirror $target; $view = Get-SpxBucketMirror -Bucket $target }
+                catch { $issues += [pscustomobject]@{ Code = 'InvalidState'; Message = $_.Exception.Message } }
+                $status = if ($issues.Count) { 'Invalid' } elseif ($pending) { 'NeedsRecovery' } elseif (-not $view) { 'Missing' } elseif ($view.State -in 'GitError', 'Drifted' -or -not $view.IsGitRepository) { 'Conflict' } else { 'Ready' }
+                if (-not $issues.Count -and $status -ne 'Ready') { $issues += [pscustomobject]@{ Code = $(if ($view) { $view.State } else { $status }); Message = $view.Evidence } }
+                Add-SpxTypeName ([pscustomobject]@{ TargetKind = 'Bucket'; Name = $target; Scope = $null; Status = $status; Placement = $null; Issues = $issues; Source = $view; PendingOperation = $pending; RetainedCopies = @(); NextActions = @(if ($pending) { 'Repair' } elseif ($status -ne 'Ready') { 'Inspect' }) }) 'SPX.Status'
+            }
+            return
+        }
+        # A changed generation invalidates the whole collected projection; retry once.
+        for ($attempt = 0; $attempt -lt 2; $attempt++) {
+            try { $cfg = Get-LinksConfig }
+            catch {
+                foreach ($target in $(if ($Name) { $Name } else { '*' })) {
+                    Add-SpxTypeName ([pscustomobject]@{ TargetKind = 'App'; Name = $target; Scope = $Scope; Status = 'Invalid'; Placement = 'Unknown'; Issues = @([pscustomobject]@{ Code = 'InvalidState'; Message = $_.Exception.Message }); Source = $null; PendingOperation = $null; RetainedCopies = @(); NextActions = @('Inspect') }) 'SPX.Status'
+                }
+                return
+            }
+            $bucketViews = @{}
+            $views = @(
+                foreach ($currentScope in Resolve-SpxScopes $Scope) {
+                    $names = if ($Name) { @($Name) } else { @(Get-SpxLinkNames $currentScope $cfg -Installed) }
+                    foreach ($target in $names) {
+                        Assert-SpxName $target 'app'
+                        $view = Get-SpxLinkObservation $target $currentScope $cfg
+                        $source = $null
+                        if ($view.Snapshot) {
+                            $recordedBucket = [string]$view.Snapshot.Install.bucket
+                            $remote = $null
+                            if ($recordedBucket) {
+                                if (-not $bucketViews.ContainsKey($recordedBucket)) {
+                                    try { $bucketViews[$recordedBucket] = Get-SpxBucketMirror -Bucket $recordedBucket }
+                                    catch { $bucketViews[$recordedBucket] = [pscustomobject]@{ State = 'GitError'; IsGitRepository = $false; Evidence = $_.Exception.Message } }
+                                }
+                                $remote = $bucketViews[$recordedBucket]
+                            }
+                            if (-not $recordedBucket -or -not $remote -or -not $remote.IsGitRepository -or $remote.State -in 'GitError', 'Drifted') {
+                                $view.Issues += [pscustomobject]@{ Code = 'SourceUnavailable'; Message = $(if ($remote.Evidence) { $remote.Evidence } else { "Inspect the recorded bucket '$recordedBucket'." }) }
+                                if ($view.Status -eq 'Ready') { $view.Status = 'Conflict'; $view.NextActions = @('Inspect') }
+                            }
+                            if ($remote.PendingOperation) {
+                                $view.Issues += [pscustomobject]@{ Code = 'BucketRecovery'; Message = "Bucket '$recordedBucket' has pending recovery." }
+                                if ($view.Status -eq 'Ready') { $view.Status = 'NeedsRecovery'; $view.NextActions = @('InspectBucket') }
+                            }
+                            $source = [pscustomobject]@{ Bucket = $recordedBucket; Version = $view.Snapshot.CurrentVersion; CurrentUrl = $remote.CurrentUrl; RepositoryState = $remote.State; PendingOperation = $remote.PendingOperation }
+                        }
+                        Add-SpxTypeName ([pscustomobject]@{ TargetKind = 'App'; Name = $target; Scope = $currentScope; Status = $view.Status; Placement = $view.Placement; IsManaged = $view.IsManaged; ActivePath = $view.Snapshot.CurrentPath; Issues = $view.Issues; Source = $source; PendingOperation = $view.PendingOperation; RetainedCopies = $view.RetainedCopies; NextActions = $view.NextActions }) 'SPX.Status'
+                    }
+                }
+            )
+            try { $stable = (Get-LinksConfig).generation -eq $cfg.generation } catch { $stable = $false }
+            if ($stable) { $views; return }
+        }
+        foreach ($view in $views) {
+            $view.Status = 'Invalid'; $view.Placement = 'Unknown'
+            $view.Issues += [pscustomobject]@{ Code = 'StateChanged'; Message = 'State changed during observation; retry.' }
+            $view
+        }
     }
 }
 
-function Import-SpxLinkConfiguration {
-    <#
-    .SYNOPSIS
-    Atomically replaces or merges a validated SPX link configuration.
-    .DESCRIPTION
-    Reads and validates an exported configuration, then atomically replaces current link intent or
-    merges its entries. It records intent only and does not relocate app files.
-    .PARAMETER Path
-    Existing configuration export to import.
-    .PARAMETER Merge
-    Merges entries instead of replacing the complete link configuration.
-    .OUTPUTS
-    SPX.LinkConfigurationImportResult.
-    .EXAMPLE
-    Import-SpxLinkConfiguration -Path '.\spx-links.json' -Merge -WhatIf
-    .NOTES
-    Inspect with Get-SpxLinkedApp, then use Sync-SpxLinkedApp or Repair-SpxLinkedApp as indicated.
-    #>
-    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
-    param ([Parameter(Mandatory)][string]$Path, [switch]$Merge)
-    $fullPath = [IO.Path]::GetFullPath($Path)
-    if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) { Stop-SpxError 'Spx.ImportNotFound' "Import path was not found: $fullPath" $fullPath }
-    if ($PSCmdlet.ShouldProcess($fullPath, $(if ($Merge) { 'merge SPX link configuration' } else { 'replace SPX link configuration' }))) {
-        Import-LinksConfig -Path $fullPath -Merge:$Merge
-        Add-SpxTypeName ([pscustomobject]@{ Path = $fullPath; Status = $(if ($Merge) { 'Merged' } else { 'Imported' }); Changed = $true }) 'SPX.LinkConfigurationImportResult'
-    }
-}
-
-# Wrappers are defined after composing private owners, so re-assert the allow-list.
+# Public automation contract; CLI helpers remain private.
 Export-ModuleMember -Function @(
-    'Move-SpxApp', 'Restore-SpxApp', 'Get-SpxLinkedApp', 'Sync-SpxLinkedApp', 'Repair-SpxLinkedApp', 'Remove-SpxStaleLink',
+    'Move-SpxApp', 'Restore-SpxApp', 'Get-SpxLinkedApp', 'Sync-SpxLinkedApp', 'Repair-SpxLinkedApp', 'Remove-SpxStaleLink', 'Remove-SpxRetainedCopy',
     'Export-SpxLinkConfiguration', 'Import-SpxLinkConfiguration', 'Get-SpxAppSource', 'Set-SpxAppSource', 'Test-SpxAppSource',
     'Compare-SpxAppSource', 'Find-SpxAppSource', 'Get-SpxBucketMirror', 'New-SpxBucketMirror', 'Set-SpxBucketMirror',
-    'Remove-SpxBucketMirror', 'Repair-SpxBucketMirror'
+    'Remove-SpxBucketMirror', 'Repair-SpxBucketMirror', 'Get-SpxStatus'
 )
+
+. "$PSScriptRoot/src/Cli.ps1"
+Register-SpxCliCompletion

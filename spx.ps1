@@ -1,119 +1,73 @@
 #Requires -Version 5.1
-
 <#
 .SYNOPSIS
-Runs SPX as a Scoop-style script command.
-
+Relocates Scoop apps, observes sources, and recovers or reclaims recorded copies.
 .DESCRIPTION
-Uses native PowerShell parameter binding, validates the selected SPX subcommand,
-and delegates to the retained SPX module transaction engine.
-
-.PARAMETER Command
-Top-level command: link, unlink, linked, sync, repair, cleanup, config, source,
-mirror, or help.
-
-.PARAMETER Arguments
-Command action and app or bucket identities.
-
-.PARAMETER Destination
-Destination root used by the link command.
-
-.PARAMETER Scope
-Scoop scope. Each command admits only its documented values.
-
-.PARAMETER Path
-Configuration import or export path.
-
-.PARAMETER Bucket
-Bucket selected by source commands.
-
-.PARAMETER Url
-Git remote URL selected by mirror commands.
-
-.PARAMETER Force
-Permits the documented source or export override.
-
-.PARAMETER Merge
-Merges imported link configuration.
-
-.PARAMETER Help
-Displays root or command-specific help without importing the SPX module.
-
-.PARAMETER Version
-Displays the package version without importing the SPX module.
-
+Uses native PowerShell binding. Run spx -Help or spx source -Help for modes and examples.
+Import-Module SPX enables context completion in the current session without changing a profile.
 .EXAMPLE
-spx link jq -Destination 'D:\Portable Apps' -Scope Local -WhatIf
-
+spx source jq -Bucket extras -WhatIf
 .EXAMPLE
-spx source set jq -Bucket extras -Force
+spx source -Bucket main -Url https://mirror.example/main.git -WhatIf
 #>
-[CmdletBinding(SupportsShouldProcess)]
+[CmdletBinding()]
 param (
     [Parameter(Position = 0)][string]$Command,
-    [Parameter(Position = 1, ValueFromRemainingArguments)][string[]]$Arguments,
+    [Parameter(Position = 1, ValueFromRemainingArguments, ValueFromPipeline, ValueFromPipelineByPropertyName)][Alias('Name', 'AppName')][object[]]$Arguments,
     [string]$Destination,
     [ValidateSet('Local', 'Global', 'All')][string]$Scope,
-    [string]$Path,
     [string]$Bucket,
+    [switch]$Buckets,
     [string]$Url,
+    [switch]$Reset,
+    [switch]$Find,
+    [string]$Compare,
+    [switch]$CheckVersion,
     [switch]$Force,
-    [switch]$Merge,
+    [switch]$WhatIf,
+    [switch]$Confirm,
     [switch]$Help,
     [switch]$Version
 )
-
-$ErrorActionPreference = 'Stop'
-. "$PSScriptRoot/lib/Cli.ps1"
-
-$passiveCommon = @(
-    'Verbose', 'Debug', 'ErrorAction', 'WarningAction', 'InformationAction',
-    'ErrorVariable', 'WarningVariable', 'InformationVariable', 'OutVariable',
-    'OutBuffer', 'PipelineVariable', 'ProgressAction'
-)
-
-if ($Version) {
-    $invalid = @($PSBoundParameters.Keys | Where-Object { $_ -notin @('Version') -and $_ -notin $passiveCommon })
-    if ($invalid.Count) {
-        Stop-SpxCliUsage "-Version cannot be combined with '-$($invalid[0])'." $invalid[0]
+begin {
+    $entryParameters = @{}
+    foreach ($key in $PSBoundParameters.Keys) { $entryParameters[$key] = $PSBoundParameters[$key] }
+    $entryRoot = $PSScriptRoot
+    . "$entryRoot/src/Cli.ps1"
+    $entryProcessed = $false
+    $entryAction = {
+        $ErrorActionPreference = 'Stop'
+        $common = @([Management.Automation.Cmdlet]::CommonParameters)
+        $names = @($Arguments | Where-Object { $null -ne $_ } | ForEach-Object { if ($_ -is [string]) { $_ } elseif ($_.AppName) { $_.AppName } elseif ($_.Name) { $_.Name } else { $_ } } | ForEach-Object { [string]$_ })
+        if ($Help -and $Command -and $Command -ne 'help' -and -not $Version) {
+            $invocation = Resolve-SpxCliInvocation -Command $Command -Names $names -BoundParameters $entryParameters -ForHelp
+            $selectors = @($entryParameters.Keys | Where-Object { $_ -notin @('Command', 'Arguments', 'Help') + $common })
+            Get-SpxCliHelp -Command $Command -ModeKey $(if ($selectors.Count) { $invocation.Key })
+            return
+        }
+        if ($Version -or -not $Command -or $Command -eq 'help' -or $Help) {
+            $allowed = @('Command', 'Arguments', 'Help') + $common
+            if ($Version) { $allowed = @('Version') + $common }
+            $invalid = @($entryParameters.Keys | Where-Object { $_ -notin $allowed })
+            if ($invalid.Count) { Stop-SpxCliUsage "Parameter '-$($invalid[0])' is not valid for help/version." $invalid[0] }
+            if ($Version) { [string](Import-PowerShellDataFile "$entryRoot/SPX.psd1").ModuleVersion; return }
+            if ($Command -eq 'help') {
+                if ($Arguments.Count -gt 1) { Stop-SpxCliUsage 'Use spx help <command>.' $Arguments }
+                Get-SpxCliHelp -Command $Arguments[0]
+            }
+            else { Get-SpxCliHelp -Command $Command }
+            return
+        }
+        $invocation = Resolve-SpxCliInvocation -Command $Command -Names $names -BoundParameters $entryParameters
+        Invoke-SpxCli -RepositoryRoot $entryRoot -Invocation $invocation
     }
-    $manifest = Import-PowerShellDataFile (Join-Path $PSScriptRoot 'SPX.psd1')
-    [string]$manifest.ModuleVersion
-    return
 }
-
-if (-not $Command) {
-    if (($PSBoundParameters.Keys | Where-Object { $_ -notin @('Help') -and $_ -notin $passiveCommon }).Count) {
-        Stop-SpxCliUsage "A command is required. Run 'spx -Help'." $PSBoundParameters
-    }
-    Get-SpxCliHelp
-    return
+process {
+    $entryProcessed = $true
+    & $entryAction
 }
-
-if ($Command.Equals('help', [StringComparison]::OrdinalIgnoreCase)) {
-    $invalid = @($PSBoundParameters.Keys | Where-Object { $_ -notin @('Command', 'Arguments') -and $_ -notin $passiveCommon })
-    if ($invalid.Count) {
-        Stop-SpxCliUsage "Parameter '-$($invalid[0])' is not valid for 'help'." $invalid[0]
-    }
-    if ($Arguments.Count -eq 0) {
-        Get-SpxCliHelp
-    }
-    else {
-        Get-SpxCliHelp -Command $Arguments[0] -Arguments @($Arguments | Select-Object -Skip 1)
-    }
-    return
+end {
+    # An independent -File invocation may inherit an empty native stdin pipe.
+    # An empty PowerShell object pipeline must not become a scope-wide action.
+    if (-not $entryProcessed -and (-not $MyInvocation.ExpectingInput -or [string]::IsNullOrEmpty($MyInvocation.Line))) { & $entryAction }
 }
-
-if ($Help) {
-    $resolved = Resolve-SpxCliLeaf -Command $Command -Arguments $Arguments
-    $allowed = @('Command', 'Arguments', 'Help') + @($resolved.Leaf.Parameters) + $passiveCommon
-    $invalid = @($PSBoundParameters.Keys | Where-Object { $_ -notin $allowed })
-    if ($invalid.Count) {
-        Stop-SpxCliUsage "Parameter '-$($invalid[0])' is not valid for '$($resolved.Key.Replace('/', ' '))'." $invalid[0]
-    }
-    Get-SpxCliHelp -Command $Command -Arguments $Arguments
-    return
-}
-
-$resolved = Resolve-SpxCliLeaf -Command $Command -Arguments $Arguments
-Invoke-SpxCli -RepositoryRoot $PSScriptRoot -Resolved $resolved -BoundParameters $PSBoundParameters

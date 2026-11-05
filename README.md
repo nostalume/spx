@@ -1,85 +1,114 @@
-# SPX — recoverable Scoop extensions
+# SPX
 
-SPX is a Scoop-style `spx` command for relocating installed apps, inspecting or changing their
-recorded bucket source, and switching bucket Git remotes. It is designed around refusal and
-recovery: ambiguous destinations, malformed state, failed Git checks, and changed recovery data
-are preserved instead of guessed away.
+SPX relocates Scoop apps, shows where they are installed and which bucket/origin they use, and
+recovers interrupted operations. Windows PowerShell 5.1 and PowerShell 7 on Windows are supported.
 
-SPX supports Windows PowerShell 5.1 and PowerShell 7 on Windows.
-
-## Install
+## Install and inspect
 
 ```powershell
 scoop bucket add spx https://github.com/nostalume/spx
 scoop install spx
-spx -Version
 spx -Help
+spx linked
+spx source jq
 ```
 
-From a checkout, replace `spx` in the examples with `./spx.ps1`.
-
-## Start safely
-
-Preview mutations with PowerShell's native `-WhatIf` parameter:
+From a checkout, use `./spx.ps1` in place of `spx`.
+Inspection returns objects with a summary, location/source, retained-copy count and next action.
+`Ready` means the observed evidence agrees; `NeedsRecovery` names an unfinished operation;
+`Conflict` or `Invalid` needs inspection. Expand `Issues`, `Source`, `PendingOperation` or
+`RetainedCopies` for the evidence. Missing bucket information does not erase installation facts.
 
 ```powershell
-spx linked -Scope All
-spx source get jq -Scope Local
-spx link jq -Destination 'D:\Portable Apps' -Scope Local -WhatIf
-spx mirror set main -Url 'https://mirror.example/main.git' -WhatIf
+spx linked jq | Select-Object Name,Scope,Status,ActivePath,Issues
 ```
 
-If the preview names the intended target, run the same command without `-WhatIf`. Native
-parameters are single-hyphen and case-insensitive. Use `-Confirm:$false` only when a
-non-interactive caller has already made the same safety decision.
+## Relocate, restore, reclaim
 
 ```powershell
-spx link jq -Destination 'D:\Portable Apps' -Confirm:$false
+spx link jq -Destination 'D:\Apps' -Scope Local -WhatIf
+spx link jq -Destination 'D:\Apps' -Scope Local
 spx linked jq
-spx unlink jq
+spx unlink jq -WhatIf
 ```
 
-The success check is `spx linked jq`: healthy relocated apps report `Healthy`. Commands return
-ordinary PowerShell objects, so selection and formatting remain available:
+`linked` lists managed apps, retained copies and pending operations; ordinary installed apps appear
+under `source`. It shows the active path after a successful relocation. `sync jq` relocates later versions;
+`unlink jq` restores them into Scoop. With no name, `sync` handles active destinations and imported
+intent in Local scope; restored history alone is skipped. Both relocation and restore retain old copies, consuming
+additional disk space. Retained copies are not unfinished recovery or an independent backup.
+
+Stop applications, Scoop and other writers before reclaiming copies:
 
 ```powershell
-spx linked -Scope All | Select-Object Name, Scope, State, Destination
+spx cleanup jq -WhatIf | Select-Object Name,EligibleCopies,BlockedCopies
+spx cleanup jq
 ```
 
-## Recovery
+The preview qualifies recorded copies without writing state. Execution checks again under the
+writer. Changed/unique data, active references, unknown links, named data streams and insufficient
+evidence stay blocked; expand `BlockedCopies` for each path and reason. There is no Force bypass.
+`cleanup` also clears proven-stale ownership while retaining payload evidence. Repeating it is safe.
 
-If an interrupted mutation leaves durable evidence, inspection reports `PendingRecovery` and new
-mutations for that identity are refused. Keep the reported files and run the matching repair:
+## One source relationship
+
+An app records a bucket; that bucket has an actual Git origin. Select which relationship to change:
+
+```powershell
+spx source jq                       # app -> bucket -> origin
+spx source jq -Bucket extras -WhatIf # only jq's recorded bucket
+spx source -Buckets                 # bucket inventory
+spx source -Bucket main             # one repository
+spx source -Bucket main -Url https://mirror.example/main.git -WhatIf
+spx source -Bucket main -Reset -WhatIf
+```
+
+Remove `-WhatIf` to apply a preview. An app-source change normally requires the target manifest's
+version to match the installed version; `-Force` permits only that mismatch. A bucket URL change
+affects every app using that bucket. Reset uses the saved original URL and refuses an unconfigured
+bucket. Inspect `spx source -Bucket main` to verify the resulting origin.
+
+`spx source -Help` also covers `-Find`, `-Compare <bucket>` and `-CheckVersion`. Version equality
+does not prove software equivalence or source trust. Mutations default to Local; app inventory
+defaults to All. Batch mutations stop at the first error; earlier commits remain committed.
+
+## Recover
 
 ```powershell
 spx repair jq -Scope Local -WhatIf
 spx repair jq -Scope Local
-
-spx mirror repair main -WhatIf
-spx mirror repair main
+spx repair -Bucket main -WhatIf
+spx repair -Buckets -WhatIf
 ```
 
-Repair uses the recorded operation plus observed files or Git state. It rolls forward only when
-the requested effect is proven; otherwise it restores the recorded pre-state. Do not manually
-delete `$env:SCOOP\spx\operations` or `.spx-*` recovery paths.
+App repair with no name handles pending apps in Local scope. Bucket targets are explicit and
+cannot be mixed with app names or Scope. Preserve operation journals and `.spx-*` paths until repair
+resolves them. Reclamation repair resumes the explicit deletion; relocation repair retains copies.
+Bucket repair never writes Git: a third-party origin value is a conflict and remains intact.
 
-## Learn more
-
-- [CLI reference](docs/cli.md) — every command, default, effect, diagnostic, and 0.4 migration.
-- [How SPX works](docs/how-it-works.md) — ownership, transaction edges, collisions, and recovery.
-- [PowerShell module API](docs/api.md) — the retained secondary automation surface.
-- [Design](docs/design.md) — maintainer boundaries, dependencies, and cost model.
-
-For repository checks:
+## Help, completion and automation
 
 ```powershell
-./tools/Invoke-Quality.ps1
-./tools/Invoke-Tests.ps1
+spx source -Help
+spx repair -Help
+spx source jq -Bucket extras -Help # help for this mode; no source change
+Import-Module SPX                  # from checkout: Import-Module ./SPX.psd1
+Get-Help Remove-SpxRetainedCopy -Full
 ```
 
-Tests use disposable Scoop roots and local Git repositories; they do not touch the live Scoop
-installation.
+Module import enables completion for this session by wrapping `TabExpansion2` for `spx` only.
+Other commands delegate to the previous implementation; `Remove-Module SPX` restores it if SPX
+still owns the wrapper. Profiles are not modified. Completion uses the same command modes and
+read-only observations; an unreadable target does not produce guessed names.
 
-## License
+The PowerShell module retains its 20 automation functions, native parameters and structured results.
+Configuration import/export remain module APIs: `Export-SpxLinkConfiguration` and
+`Import-SpxLinkConfiguration`. Import records intent and cannot replace active ownership or recovery.
 
-Apache-2.0 OR MIT; see [LICENSE-Apache](LICENSE-Apache) and [LICENSE-MIT](LICENSE-MIT).
+Old CLI syntax switches directly: `source get jq` becomes `source jq`; `source set jq -Bucket extras`
+becomes `source jq -Bucket extras`; `mirror set main -Url ...` becomes `source -Bucket main -Url ...`;
+`mirror remove main` becomes `source -Bucket main -Reset`. CLI `config` and `mirror` are removed.
+
+See [maintaining SPX](docs/maintaining.md) for ownership, commit/recovery rules, proof limits and checks.
+
+Apache-2.0 OR MIT: [Apache license](LICENSE-Apache), [MIT license](LICENSE-MIT).
