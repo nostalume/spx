@@ -19,10 +19,11 @@ try {
     if ($parseFailures.Count) { throw ('PowerShell parse failures: ' + (($parseFailures | ForEach-Object Message) -join '; ')) }
     Import-Module (Join-Path $repository 'SPX.psd1') -Force
     $exports = @(Get-Command -Module SPX | Select-Object -ExpandProperty Name | Sort-Object)
-    $expected = @((Import-PowerShellDataFile (Join-Path $repository 'SPX.psd1')).FunctionsToExport | Sort-Object)
+    $manifest = Import-PowerShellDataFile (Join-Path $repository 'SPX.psd1')
+    $expected = @($manifest.FunctionsToExport | Sort-Object)
     if (Compare-Object $exports $expected) { throw 'Module exports differ from the explicit manifest allow-list.' }
     $entry = Join-Path $repository 'spx.ps1'
-    if ((& $entry -Version | Out-String).Trim() -ne '0.5.0') { throw 'CLI version failed.' }
+    if ((& $entry -Version | Out-String).Trim() -ne [string]$manifest.ModuleVersion) { throw 'CLI version failed.' }
     if ((& $entry -Help | Out-String) -notmatch 'spx <command>') { throw 'CLI help failed.' }
 
     $app = New-SpxTestApp -Name smoke -Version 1 -Bucket main

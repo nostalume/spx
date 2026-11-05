@@ -70,6 +70,8 @@ $sourceFiles = @(
     $manifest = Test-ModuleManifest -Path $manifestPath -ErrorAction Stop
     $package = Get-Content -LiteralPath (Join-Path $repository 'spx.json') -Raw | ConvertFrom-Json
     if ([string]$manifest.Version -ne [string]$package.version) { throw 'SPX.psd1 and spx.json versions differ.' }
+    if ([string]$package.url -cne "$($package.homepage)/archive/refs/tags/v$($package.version).zip") { throw 'spx.json URL does not match its versioned source archive.' }
+    if ([string]$package.extract_dir -cne "spx-$($package.version)") { throw 'spx.json extract_dir does not match its version.' }
     if ([string]$package.bin -ne 'spx.ps1') { throw 'spx.json must expose bin = spx.ps1.' }
     if ([string]$package.psmodule.name -ne 'SPX') { throw 'spx.json must retain psmodule.name = SPX.' }
 

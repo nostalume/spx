@@ -13,100 +13,39 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  quality:
-    runs-on: windows-latest
-    timeout-minutes: 15
-    steps:
-      - name: Checkout tagged source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Install pinned analyzer
-        shell: pwsh
-        run: Install-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -Force -Scope CurrentUser
-      - name: Run canonical quality checks
-        shell: pwsh
-        run: ./tools/Invoke-Quality.ps1
-
-  test:
-    runs-on: windows-latest
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        runtime: [powershell, pwsh]
-    steps:
-      - name: Checkout tagged source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Install pinned Pester in Windows PowerShell
-        if: matrix.runtime == 'powershell'
-        shell: powershell
-        run: Install-Module Pester -RequiredVersion 5.7.1 -Force -SkipPublisherCheck -Scope CurrentUser
-      - name: Run Windows PowerShell tests and packaged CLI smoke
-        if: matrix.runtime == 'powershell'
-        shell: powershell
-        run: ./tools/Invoke-Tests.ps1
-      - name: Install pinned Pester in PowerShell 7
-        if: matrix.runtime == 'pwsh'
-        shell: pwsh
-        run: Install-Module Pester -RequiredVersion 5.7.1 -Force -SkipPublisherCheck -Scope CurrentUser
-      - name: Run PowerShell 7 tests and packaged CLI smoke
-        if: matrix.runtime == 'pwsh'
-        shell: pwsh
-        run: ./tools/Invoke-Tests.ps1
+  checks:
+    uses: ./.github/workflows/test.yaml
 
   release:
-    needs: [quality, test]
+    needs: checks
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
       contents: write
-
     steps:
-      - name: Checkout code
+      - name: Checkout tagged source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0
           persist-credentials: false
-
-      - name: Derive version strings
-        id: ver
-        run: |
-          TAG="${GITHUB_REF#refs/tags/}"
-          VER="${TAG#v}"
-          echo "TAG=$TAG"   >> "$GITHUB_OUTPUT"
-          echo "VER=$VER"   >> "$GITHUB_OUTPUT"
-
       - name: Validate tagged package identity
         shell: pwsh
         env:
-          RELEASE_TAG: ${{ steps.ver.outputs.TAG }}
-          RELEASE_VERSION: ${{ steps.ver.outputs.VER }}
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
           $module = Import-PowerShellDataFile ./SPX.psd1
-          $moduleVersion = [string]$module.ModuleVersion
-          $prerelease = [string]$module.PrivateData.PSData.Prerelease
-          if ($prerelease) { $moduleVersion = "$moduleVersion-$prerelease" }
+          $version = [string]$module.ModuleVersion
+          if ($module.PrivateData.PSData.Prerelease) { $version += '-' + $module.PrivateData.PSData.Prerelease }
           $package = Get-Content ./spx.json -Raw | ConvertFrom-Json
+          if ($env:RELEASE_TAG -cne "v$version") { throw 'Tag does not match SPX.psd1.' }
+          if ([string]$package.version -cne $version) { throw 'Tag does not match spx.json.' }
           $expectedUrl = "https://github.com/$env:GITHUB_REPOSITORY/archive/refs/tags/$env:RELEASE_TAG.zip"
-          if ($env:RELEASE_TAG -ne "v$env:RELEASE_VERSION") { throw 'Tag/version identity is invalid.' }
-          if ($moduleVersion -ne $env:RELEASE_VERSION) { throw 'SPX.psd1 does not match the release tag.' }
-          if ([string]$package.version -ne $env:RELEASE_VERSION) { throw 'spx.json does not match the release tag.' }
-          if ([string]$package.url -ne $expectedUrl) { throw 'spx.json URL does not match the immutable tag archive.' }
-          if ([string]$package.extract_dir -ne "spx-$env:RELEASE_VERSION") { throw 'spx.json extract_dir does not match the release tag.' }
-
+          if ([string]$package.url -cne $expectedUrl) { throw 'Package URL does not match the tagged repository.' }
+          if ([string]$package.extract_dir -cne "spx-$version") { throw 'Package extract_dir does not match the tag.' }
       - name: Create GitHub Release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
-          tag_name:         ${{ steps.ver.outputs.TAG }}
-          name:             SPX ${{ steps.ver.outputs.TAG }}
+          tag_name: ${{ github.ref_name }}
+          name: SPX ${{ github.ref_name }}
           generate_release_notes: true
-          draft:            false
-          prerelease: >-
-            ${{
-              contains(steps.ver.outputs.TAG, '-rc')   ||
-              contains(steps.ver.outputs.TAG, '-beta')  ||
-              contains(steps.ver.outputs.TAG, '-alpha')
-            }}
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}

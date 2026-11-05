@@ -5,6 +5,7 @@ Describe 'SPX command modes' {
         . "$PSScriptRoot/TestSupport.ps1"
         . (Join-Path $PSScriptRoot '..\src\Cli.ps1')
         $entry = Join-Path $PSScriptRoot '..\spx.ps1'
+        $expectedVersion = [string](Import-PowerShellDataFile (Join-Path $PSScriptRoot '..\SPX.psd1')).ModuleVersion
     }
     It 'admits <Key> without loading state' -ForEach @(
         @{Key = 'link'; Command = 'link'; Names = @('one'); Bound = @{Destination = 'D:\Apps' } }
@@ -74,7 +75,7 @@ Describe 'SPX command modes' {
             (& $entry -Help | Out-String) | Should -Match 'spx <command>'
             foreach ($command in 'source', 'repair', 'cleanup', 'link', 'unlink', 'linked', 'sync') { (& $entry $command -Help | Out-String) | Should -Match "spx $command" }
             (& $entry help source | Out-String) | Should -Match 'CheckVersion'
-            (& $entry -Version) | Should -Be '0.5.0'
+            (& $entry -Version) | Should -Be $expectedVersion
             { & $entry -Version -Scope All } | Should -Throw -ErrorId 'Spx.CliUsage'
             Get-Module SPX | Should -BeNullOrEmpty
             Test-Path $env:SCOOP | Should -BeFalse
@@ -256,7 +257,7 @@ Describe 'SPX CLI recovery and shell integration' {
         if (-not $process.WaitForExit(30000)) { $process.Kill(); throw 'CLI version process timed out.' }
         $process.WaitForExit(); $process.Refresh()
         $process.ExitCode | Should -Be 0
-        (Get-Content (Join-Path $sb.Root 'version.txt') -Raw).Trim() | Should -Be '0.5.0'
+        (Get-Content (Join-Path $sb.Root 'version.txt') -Raw).Trim() | Should -Be ([string](Import-PowerShellDataFile $module).ModuleVersion)
     }
 
     It 'does not turn an empty object pipeline into scope-wide synchronization' {
