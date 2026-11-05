@@ -1,6 +1,6 @@
-﻿@{
+@{
     RootModule = 'SPX.psm1'
-    ModuleVersion = '0.5.0'
+    ModuleVersion = '0.6.0'
     GUID = 'cb81d0f7-9688-4f35-a387-2bdd7e252f2f'
     Author = 'SPX contributors'
     CompanyName = 'Community'
